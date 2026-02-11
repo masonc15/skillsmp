@@ -1,0 +1,18 @@
+[project]
+name = "skillsmp"
+version = "0.1.0"
+description = "Search the SkillsMP marketplace for agent skills"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Colin Mason", email = "masonc789@gmail.com" },
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+skillsmp = "skillsmp:main"
+
+[build-system]
+requires = ["uv_build>=0.10.2,<0.11.0"]
+build-backend = "uv_build"
