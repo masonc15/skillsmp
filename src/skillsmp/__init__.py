@@ -191,13 +191,108 @@ def _cmd_ai_search(query: str) -> None:
         )
 
 
+# --- error handling ---
+
+
+def _die(msg: str) -> None:
+    print(f"skillsmp: {msg}", file=sys.stderr)
+    print('Try "skillsmp --help" for usage.', file=sys.stderr)
+    raise SystemExit(2)
+
+
+# --- argument parsing ---
+
+
+def _parse_args(argv: list[str]) -> dict:
+    mode = "search"
+    limit: int | None = None
+    page: int | None = None
+    sort: str | None = None
+    query_parts: list[str] = []
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-h", "--help"):
+            print("Usage: skillsmp [flags] <query ...>")
+            raise SystemExit(0)
+        elif arg == "--version":
+            print(f"skillsmp {__version__}")
+            raise SystemExit(0)
+        elif arg in ("-a", "--ai"):
+            mode = "ai"
+        elif arg in ("-n", "--limit"):
+            i += 1
+            if i >= len(argv):
+                _die(f"flag {arg} requires a value")
+            limit = argv[i]  # type: ignore[assignment]
+        elif arg in ("-s", "--sort"):
+            i += 1
+            if i >= len(argv):
+                _die(f"flag {arg} requires a value")
+            sort = argv[i]
+        elif arg in ("-p", "--page"):
+            i += 1
+            if i >= len(argv):
+                _die(f"flag {arg} requires a value")
+            page = argv[i]  # type: ignore[assignment]
+        elif arg == "--":
+            i += 1
+            query_parts.extend(argv[i:])
+            break
+        elif arg.startswith("-"):
+            _die(f"unknown flag: {arg}")
+        else:
+            query_parts.extend(argv[i:])
+            break
+        i += 1
+
+    if not query_parts:
+        print("Usage: skillsmp [flags] <query ...>", file=sys.stderr)
+        raise SystemExit(2)
+
+    # Validate.
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except ValueError:
+            _die(f"--limit must be a number (got: {limit})")
+        if not 1 <= limit <= 100:
+            _die(f"--limit must be 1-100 (got: {limit})")
+
+    if page is not None:
+        try:
+            page = int(page)
+        except ValueError:
+            _die(f"--page must be a number (got: {page})")
+
+    if sort is not None and sort not in ("stars", "recent"):
+        _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
+
+    if mode == "ai" and any(x is not None for x in (limit, page, sort)):
+        _die("--limit, --page, --sort do not apply to --ai search")
+
+    return {
+        "mode": mode,
+        "query": " ".join(query_parts),
+        "limit": limit if limit is not None else 10,
+        "page": page if page is not None else 1,
+        "sort": sort if sort is not None else "stars",
+    }
+
+
 # --- entry point ---
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: skillsmp <query>", file=sys.stderr)
-        raise SystemExit(2)
+    args = _parse_args(sys.argv[1:])
 
-    query = " ".join(sys.argv[1:])
-    _cmd_search(query)
+    if args["mode"] == "ai":
+        _cmd_ai_search(args["query"])
+    else:
+        _cmd_search(
+            args["query"],
+            limit=args["limit"],
+            page=args["page"],
+            sort=args["sort"],
+        )
