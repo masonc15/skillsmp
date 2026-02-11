@@ -35,7 +35,7 @@ skillsmp --plain react | grep facebook
 
 The default keyword search matches your query against skill names and descriptions, sorted by stars. It's fast (~300ms) and supports pagination, but ranks by popularity rather than relevance.
 
-`--ai` runs a vector similarity search powered by Cloudflare Vectorize. Each skill's full SKILL.md has been embedded, and your query is compared against those embeddings by cosine similarity. This returns fewer results (~10) with relevance scores, but finds semantically related skills that keyword search misses. No pagination — just the nearest neighbors. Slower (~4-5s) because the query must be embedded first.
+`--ai` runs a vector similarity search powered by [Cloudflare Vectorize](https://developers.cloudflare.com/vectorize/). Each skill's full SKILL.md has been embedded, and your query is compared against those embeddings. This returns ~10 results ranked by relevance score, catching semantically related skills that keyword search misses. Pagination and sorting don't apply. Slower (~4-5s) because the query must be embedded first.
 
 ## Flags
 
