@@ -79,7 +79,7 @@ def _full_help() -> str:
 {_bold("Environment:")}
   SKILLSMP_API_KEY    API key (required). Read from env or ~/.env.
 
-Docs: https://skillsmp.com
+Docs: https://github.com/masonc15/skillsmp
 """
 
 # --- error handling ---
