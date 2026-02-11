@@ -95,23 +95,31 @@ def _die(msg: str) -> None:
 
 
 def _load_env_file() -> None:
-    """Source key=value pairs from ~/.env if the file exists."""
+    """Load SKILLSMP_API_KEY from ~/.env if it is not already set."""
+    if os.environ.get("SKILLSMP_API_KEY"):
+        return
+
     env_path = os.path.join(os.path.expanduser("~"), ".env")
     if not os.path.isfile(env_path):
         return
-    with open(env_path) as f:
+
+    with open(env_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            # Handle export VAR=val and VAR=val
+
+            # Handle `export VAR=val` and `VAR=val`.
             if line.startswith("export "):
                 line = line[7:]
+
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip("\"'")
-            if key and key not in os.environ:
+
+            if key == "SKILLSMP_API_KEY" and key not in os.environ:
                 os.environ[key] = val
+                return
 
 
 def _get_api_key() -> str:
