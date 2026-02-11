@@ -269,6 +269,11 @@ def _cmd_search(
     print(f'Keyword search: "{query}" — {total} results (page {pg}/{total_pages})\n')
     if not skills:
         print("  No results found.")
+        if _stderr_is_tty():
+            print(
+                f'\n  Tip: try "skillsmp --ai {query}" for semantic search.',
+                file=sys.stderr,
+            )
         return
     for s in skills:
         _print_skill(s)
@@ -432,6 +437,15 @@ def _parse_args(argv: list[str]) -> dict:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+
+    # Progress indicator for AI search (TTY only, human output only).
+    if (
+        args["mode"] == "ai"
+        and _stderr_is_tty()
+        and not args["json"]
+        and not args["plain"]
+    ):
+        print("Searching (AI)...\r", end="", file=sys.stderr, flush=True)
 
     if args["mode"] == "ai":
         _cmd_ai_search(
