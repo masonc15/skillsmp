@@ -55,7 +55,9 @@ def _get_api_key() -> str:
 # --- API client ---
 
 
-def _api_request(endpoint: str, params: dict) -> dict:
+def _api_request(
+    endpoint: str, params: dict, *, use_json_errors: bool = False
+) -> dict:
     api_key = _get_api_key()
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     url = f"{BASE_URL}/{endpoint}?{qs}"
@@ -77,10 +79,18 @@ def _api_request(endpoint: str, params: dict) -> dict:
             pass
         err = body.get("error", {})
         msg = err.get("message", e.reason)
-        print(f"skillsmp: API error ({e.code}): {msg}", file=sys.stderr)
+        if use_json_errors:
+            json.dump({"error": msg, "code": e.code}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"skillsmp: API error ({e.code}): {msg}", file=sys.stderr)
         raise SystemExit(1)
     except urllib.error.URLError as e:
-        print(f"skillsmp: network error: {e.reason}", file=sys.stderr)
+        if use_json_errors:
+            json.dump({"error": str(e.reason)}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"skillsmp: network error: {e.reason}", file=sys.stderr)
         raise SystemExit(1)
 
 
@@ -148,12 +158,29 @@ def _cmd_search(
     limit: int = 10,
     page: int = 1,
     sort: str = "stars",
+    output_json: bool = False,
 ) -> None:
     params = {"q": query, "limit": limit, "page": page, "sortBy": sort}
-    result = _api_request("search", params)
+    result = _api_request("search", params, use_json_errors=output_json)
     data = result.get("data", {})
     skills = data.get("skills", [])
     pagination = data.get("pagination", {})
+
+    if output_json:
+        json.dump(
+            {
+                "query": query,
+                "mode": "keyword",
+                "total": pagination.get("total", 0),
+                "page": pagination.get("page", 1),
+                "totalPages": pagination.get("totalPages", 1),
+                "skills": [_normalize_skill(s) for s in skills],
+            },
+            sys.stdout,
+            indent=2,
+        )
+        print()
+        return
 
     total = pagination.get("total", 0)
     pg = pagination.get("page", 1)
@@ -167,14 +194,36 @@ def _cmd_search(
         _print_skill(s)
 
 
-def _cmd_ai_search(query: str) -> None:
+def _cmd_ai_search(
+    query: str,
+    *,
+    output_json: bool = False,
+) -> None:
     params = {"q": query}
-    result = _api_request("ai-search", params)
+    result = _api_request("ai-search", params, use_json_errors=output_json)
     data = result.get("data", {})
     entries = data.get("data", [])
 
     with_skill = [e for e in entries if e.get("skill")]
     without_skill = [e for e in entries if not e.get("skill")]
+
+    if output_json:
+        json.dump(
+            {
+                "query": query,
+                "mode": "semantic",
+                "total": len(entries),
+                "withMetadata": len(with_skill),
+                "skills": [
+                    _normalize_skill(e["skill"], score=e.get("score"))
+                    for e in with_skill
+                ],
+            },
+            sys.stdout,
+            indent=2,
+        )
+        print()
+        return
 
     print(
         f'AI search: "{query}" — {len(entries)} results '
@@ -208,6 +257,7 @@ def _parse_args(argv: list[str]) -> dict:
     limit: int | None = None
     page: int | None = None
     sort: str | None = None
+    output_json = False
     query_parts: list[str] = []
 
     i = 0
@@ -221,6 +271,8 @@ def _parse_args(argv: list[str]) -> dict:
             raise SystemExit(0)
         elif arg in ("-a", "--ai"):
             mode = "ai"
+        elif arg in ("-j", "--json"):
+            output_json = True
         elif arg in ("-n", "--limit"):
             i += 1
             if i >= len(argv):
@@ -278,6 +330,7 @@ def _parse_args(argv: list[str]) -> dict:
         "limit": limit if limit is not None else 10,
         "page": page if page is not None else 1,
         "sort": sort if sort is not None else "stars",
+        "json": output_json,
     }
 
 
@@ -288,11 +341,12 @@ def main() -> None:
     args = _parse_args(sys.argv[1:])
 
     if args["mode"] == "ai":
-        _cmd_ai_search(args["query"])
+        _cmd_ai_search(args["query"], output_json=args["json"])
     else:
         _cmd_search(
             args["query"],
             limit=args["limit"],
             page=args["page"],
             sort=args["sort"],
+            output_json=args["json"],
         )
