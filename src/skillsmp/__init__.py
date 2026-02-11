@@ -10,7 +10,68 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
+
+# --- TTY / formatting helpers ---
+
+
+def _stderr_is_tty() -> bool:
+    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+
+def _bold(text: str) -> str:
+    """Wrap text in bold escapes when stderr is a TTY."""
+    if _stderr_is_tty():
+        return f"\033[1m{text}\033[0m"
+    return text
+
+
+# --- help texts ---
+
+CONCISE_HELP = f"""\
+{_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+
+{_bold("Examples:")}
+  skillsmp terraform
+  skillsmp --ai "how to optimize database queries"
+
+Run "skillsmp --help" for all options.
+"""
+
+FULL_HELP = f"""\
+{_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+
+{_bold("Usage:")}
+  skillsmp [flags] <query ...>
+  skillsmp --ai [flags] <query ...>
+
+{_bold("Search modes:")}
+  (default)       Keyword search — fast, supports pagination and sorting
+  -a, --ai        AI semantic search — natural language, relevance-scored
+
+{_bold("Flags:")}
+  -n, --limit N   Results per page (1-100, default: 10)
+  -p, --page N    Page number (default: 1)
+  -s, --sort KEY  Sort order: stars, recent (default: stars)
+  -j, --json      Machine-readable JSON output
+      --plain     One-line-per-result output for grep/awk
+  -h, --help      Show this help
+      --version   Show version
+
+  --limit, --page, and --sort apply to keyword search only.
+
+{_bold("Examples:")}
+  skillsmp terraform
+  skillsmp --ai "how to optimize database queries"
+  skillsmp --limit 5 --sort recent react testing
+  skillsmp --json deployment
+  skillsmp --plain react | grep facebook
+
+{_bold("Environment:")}
+  SKILLSMP_API_KEY    API key (required). Read from env or ~/.env.
+
+Docs: https://skillsmp.com
+"""
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 REQUEST_TIMEOUT = 30
@@ -290,7 +351,7 @@ def _parse_args(argv: list[str]) -> dict:
     while i < len(argv):
         arg = argv[i]
         if arg in ("-h", "--help"):
-            print("Usage: skillsmp [flags] <query ...>")
+            print(FULL_HELP)
             raise SystemExit(0)
         elif arg == "--version":
             print(f"skillsmp {__version__}")
@@ -327,8 +388,9 @@ def _parse_args(argv: list[str]) -> dict:
             break
         i += 1
 
+    # No args: concise help, not a bare error.
     if not query_parts:
-        print("Usage: skillsmp [flags] <query ...>", file=sys.stderr)
+        print(CONCISE_HELP, file=sys.stderr)
         raise SystemExit(2)
 
     # Validate.
