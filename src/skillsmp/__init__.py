@@ -15,6 +15,7 @@ __version__ = "0.1.0"
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 REQUEST_TIMEOUT = 30
 DESC_DISPLAY_LIMIT = 200
+DESC_PLAIN_LIMIT = 120
 
 # --- API key ---
 
@@ -149,6 +150,18 @@ def _print_skill(skill: dict, score: float | None = None) -> None:
     print()
 
 
+def _print_skill_plain(skill: dict, score: float | None = None) -> None:
+    parts = [
+        f"{skill.get('author', 'unknown')}/{skill.get('name', 'unknown')}",
+        str(skill.get("stars", 0)),
+        skill.get("description", "")[:DESC_PLAIN_LIMIT],
+        skill.get("githubUrl", ""),
+    ]
+    if score is not None:
+        parts.append(str(round(score, 4)))
+    print("\t".join(parts))
+
+
 # --- commands ---
 
 
@@ -159,6 +172,7 @@ def _cmd_search(
     page: int = 1,
     sort: str = "stars",
     output_json: bool = False,
+    output_plain: bool = False,
 ) -> None:
     params = {"q": query, "limit": limit, "page": page, "sortBy": sort}
     result = _api_request("search", params, use_json_errors=output_json)
@@ -182,6 +196,11 @@ def _cmd_search(
         print()
         return
 
+    if output_plain:
+        for s in skills:
+            _print_skill_plain(s)
+        return
+
     total = pagination.get("total", 0)
     pg = pagination.get("page", 1)
     total_pages = pagination.get("totalPages", 1)
@@ -198,6 +217,7 @@ def _cmd_ai_search(
     query: str,
     *,
     output_json: bool = False,
+    output_plain: bool = False,
 ) -> None:
     params = {"q": query}
     result = _api_request("ai-search", params, use_json_errors=output_json)
@@ -223,6 +243,11 @@ def _cmd_ai_search(
             indent=2,
         )
         print()
+        return
+
+    if output_plain:
+        for entry in with_skill:
+            _print_skill_plain(entry["skill"], score=entry.get("score"))
         return
 
     print(
@@ -258,6 +283,7 @@ def _parse_args(argv: list[str]) -> dict:
     page: int | None = None
     sort: str | None = None
     output_json = False
+    output_plain = False
     query_parts: list[str] = []
 
     i = 0
@@ -273,6 +299,8 @@ def _parse_args(argv: list[str]) -> dict:
             mode = "ai"
         elif arg in ("-j", "--json"):
             output_json = True
+        elif arg == "--plain":
+            output_plain = True
         elif arg in ("-n", "--limit"):
             i += 1
             if i >= len(argv):
@@ -304,6 +332,8 @@ def _parse_args(argv: list[str]) -> dict:
         raise SystemExit(2)
 
     # Validate.
+    if output_json and output_plain:
+        _die("--json and --plain are mutually exclusive")
     if limit is not None:
         try:
             limit = int(limit)
@@ -331,6 +361,7 @@ def _parse_args(argv: list[str]) -> dict:
         "page": page if page is not None else 1,
         "sort": sort if sort is not None else "stars",
         "json": output_json,
+        "plain": output_plain,
     }
 
 
@@ -341,7 +372,11 @@ def main() -> None:
     args = _parse_args(sys.argv[1:])
 
     if args["mode"] == "ai":
-        _cmd_ai_search(args["query"], output_json=args["json"])
+        _cmd_ai_search(
+            args["query"],
+            output_json=args["json"],
+            output_plain=args["plain"],
+        )
     else:
         _cmd_search(
             args["query"],
@@ -349,4 +384,5 @@ def main() -> None:
             page=args["page"],
             sort=args["sort"],
             output_json=args["json"],
+            output_plain=args["plain"],
         )
