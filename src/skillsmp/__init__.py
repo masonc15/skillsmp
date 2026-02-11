@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 
 __version__ = "1.0.0"
 
+BASE_URL = "https://skillsmp.com/api/v1/skills"
+REQUEST_TIMEOUT = 30
+DESC_DISPLAY_LIMIT = 200
+DESC_PLAIN_LIMIT = 120
+
 # --- TTY / formatting helpers ---
 
 
@@ -73,10 +78,14 @@ FULL_HELP = f"""\
 Docs: https://skillsmp.com
 """
 
-BASE_URL = "https://skillsmp.com/api/v1/skills"
-REQUEST_TIMEOUT = 30
-DESC_DISPLAY_LIMIT = 200
-DESC_PLAIN_LIMIT = 120
+# --- error handling ---
+
+
+def _die(msg: str) -> None:
+    print(f"skillsmp: {msg}", file=sys.stderr)
+    print('Try "skillsmp --help" for usage.', file=sys.stderr)
+    raise SystemExit(2)
+
 
 # --- API key ---
 
@@ -91,6 +100,7 @@ def _load_env_file() -> None:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            # Handle export VAR=val and VAR=val
             if line.startswith("export "):
                 line = line[7:]
             key, _, val = line.partition("=")
@@ -106,11 +116,7 @@ def _get_api_key() -> str:
         _load_env_file()
         key = os.environ.get("SKILLSMP_API_KEY", "")
     if not key:
-        print(
-            "skillsmp: SKILLSMP_API_KEY not set. Export it or add to ~/.env.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+        _die("SKILLSMP_API_KEY not set. Export it or add to ~/.env.")
     return key
 
 
@@ -331,15 +337,6 @@ def _cmd_ai_search(
         )
 
 
-# --- error handling ---
-
-
-def _die(msg: str) -> None:
-    print(f"skillsmp: {msg}", file=sys.stderr)
-    print('Try "skillsmp --help" for usage.', file=sys.stderr)
-    raise SystemExit(2)
-
-
 # --- argument parsing ---
 
 
@@ -393,7 +390,7 @@ def _parse_args(argv: list[str]) -> dict:
             break
         i += 1
 
-    # No args: concise help, not a bare error.
+    # No args at all: concise help.
     if not query_parts:
         print(CONCISE_HELP, file=sys.stderr)
         raise SystemExit(2)
@@ -401,6 +398,7 @@ def _parse_args(argv: list[str]) -> dict:
     # Validate.
     if output_json and output_plain:
         _die("--json and --plain are mutually exclusive")
+
     if limit is not None:
         try:
             limit = int(limit)

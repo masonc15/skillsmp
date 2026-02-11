@@ -7,13 +7,13 @@ Search the [SkillsMP marketplace](https://skillsmp.com) for agent skills from th
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```
-uv tool install git+https://github.com/colinmason/skillsmp
+uv tool install git+https://github.com/masonc15/skillsmp
 ```
 
 Or install from a local clone:
 
 ```
-git clone https://github.com/colinmason/skillsmp
+git clone https://github.com/masonc15/skillsmp
 cd skillsmp
 uv tool install .
 ```
