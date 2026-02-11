@@ -33,7 +33,9 @@ def _bold(text: str) -> str:
 
 # --- help texts ---
 
-CONCISE_HELP = f"""\
+
+def _concise_help() -> str:
+    return f"""\
 {_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
 
 {_bold("Examples:")}
@@ -43,7 +45,9 @@ CONCISE_HELP = f"""\
 Run "skillsmp --help" for all options.
 """
 
-FULL_HELP = f"""\
+
+def _full_help() -> str:
+    return f"""\
 {_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
 
 {_bold("Usage:")}
@@ -353,7 +357,7 @@ def _parse_args(argv: list[str]) -> dict:
     while i < len(argv):
         arg = argv[i]
         if arg in ("-h", "--help"):
-            print(FULL_HELP)
+            print(_full_help())
             raise SystemExit(0)
         elif arg == "--version":
             print(f"skillsmp {__version__}")
@@ -392,7 +396,7 @@ def _parse_args(argv: list[str]) -> dict:
 
     # No args at all: concise help.
     if not query_parts:
-        print(CONCISE_HELP, file=sys.stderr)
+        print(_concise_help(), file=sys.stderr)
         raise SystemExit(2)
 
     # Validate.
