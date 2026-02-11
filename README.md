@@ -7,7 +7,13 @@ Search the [SkillsMP marketplace](https://skillsmp.com) for agent skills from th
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```
-uv tool install git+https://github.com/masonc15/skillsmp
+uv tool install skillsmp
+```
+
+Or run without installing:
+
+```
+uvx skillsmp terraform
 ```
 
 Set your API key in `~/.env` or export it directly:
