@@ -139,6 +139,58 @@ def _print_skill(skill: dict, score: float | None = None) -> None:
     print()
 
 
+# --- commands ---
+
+
+def _cmd_search(
+    query: str,
+    *,
+    limit: int = 10,
+    page: int = 1,
+    sort: str = "stars",
+) -> None:
+    params = {"q": query, "limit": limit, "page": page, "sortBy": sort}
+    result = _api_request("search", params)
+    data = result.get("data", {})
+    skills = data.get("skills", [])
+    pagination = data.get("pagination", {})
+
+    total = pagination.get("total", 0)
+    pg = pagination.get("page", 1)
+    total_pages = pagination.get("totalPages", 1)
+
+    print(f'Keyword search: "{query}" — {total} results (page {pg}/{total_pages})\n')
+    if not skills:
+        print("  No results found.")
+        return
+    for s in skills:
+        _print_skill(s)
+
+
+def _cmd_ai_search(query: str) -> None:
+    params = {"q": query}
+    result = _api_request("ai-search", params)
+    data = result.get("data", {})
+    entries = data.get("data", [])
+
+    with_skill = [e for e in entries if e.get("skill")]
+    without_skill = [e for e in entries if not e.get("skill")]
+
+    print(
+        f'AI search: "{query}" — {len(entries)} results '
+        f"({len(with_skill)} with metadata)\n"
+    )
+    if not entries:
+        print("  No results found.")
+        return
+    for entry in with_skill:
+        _print_skill(entry["skill"], score=entry.get("score"))
+    if without_skill:
+        print(
+            f"  ({len(without_skill)} additional results without full metadata, skipped)"
+        )
+
+
 # --- entry point ---
 
 
@@ -148,19 +200,4 @@ def main() -> None:
         raise SystemExit(2)
 
     query = " ".join(sys.argv[1:])
-    params = {"q": query, "limit": 10, "page": 1, "sortBy": "stars"}
-    result = _api_request("search", params)
-    data = result.get("data", {})
-    skills = data.get("skills", [])
-    pagination = data.get("pagination", {})
-
-    total = pagination.get("total", 0)
-    page = pagination.get("page", 1)
-    total_pages = pagination.get("totalPages", 1)
-
-    print(f'Keyword search: "{query}" — {total} results (page {page}/{total_pages})\n')
-    if not skills:
-        print("  No results found.")
-        return
-    for s in skills:
-        _print_skill(s)
+    _cmd_search(query)
