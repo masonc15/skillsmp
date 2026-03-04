@@ -177,9 +177,17 @@ def _api_request(
 # --- formatting ---
 
 
-def _format_timestamp(ts: int | None) -> str:
+def _format_timestamp(ts: int | str | None) -> str:
     if not ts:
         return "unknown"
+    if isinstance(ts, str):
+        try:
+            ts = int(ts)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+            except ValueError:
+                return ts[:10] if len(ts) >= 10 else ts
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
