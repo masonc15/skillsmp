@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +16,10 @@ __version__ = "1.0.0"
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 REQUEST_TIMEOUT = 30
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 4.0
+_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 DESC_DISPLAY_LIMIT = 200
 DESC_PLAIN_LIMIT = 120
 
@@ -135,43 +141,76 @@ def _get_api_key() -> str:
 # --- API client ---
 
 
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _RETRYABLE_STATUS_CODES
+    return isinstance(exc, urllib.error.URLError)
+
+
+def _retry_delay(attempt: int) -> float:
+    delay = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+    return delay * random.uniform(1.0, 1.3)
+
+
 def _api_request(
     endpoint: str, params: dict, *, use_json_errors: bool = False
 ) -> dict:
     api_key = _get_api_key()
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     url = f"{BASE_URL}/{endpoint}?{qs}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": f"skillsmp-cli/{__version__}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
+
+    last_exc: Exception | None = None
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": f"skillsmp-cli/{__version__}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            last_exc = e
+            is_last = attempt == RETRY_MAX_ATTEMPTS - 1
+            if not is_last and _is_retryable(e):
+                retries_left = RETRY_MAX_ATTEMPTS - attempt - 1
+                if isinstance(e, urllib.error.HTTPError):
+                    label = f"server error ({e.code})"
+                else:
+                    label = f"network error: {e.reason}"
+                print(
+                    f"skillsmp: {label}, retrying ({retries_left} left)...",
+                    file=sys.stderr,
+                )
+                time.sleep(_retry_delay(attempt))
+                continue
+            break
+
+    # All retries exhausted or non-retryable error — report and exit.
+    if isinstance(last_exc, urllib.error.HTTPError):
         body: dict = {}
         try:
-            body = json.loads(e.read())
+            body = json.loads(last_exc.read())
         except Exception:
             pass
         err = body.get("error", {})
-        msg = err.get("message", e.reason)
+        msg = err.get("message", last_exc.reason)
         if use_json_errors:
-            json.dump({"error": msg, "code": e.code}, sys.stdout, indent=2)
+            json.dump({"error": msg, "code": last_exc.code}, sys.stdout, indent=2)
             print()
         else:
-            print(f"skillsmp: API error ({e.code}): {msg}", file=sys.stderr)
-        raise SystemExit(1)
-    except urllib.error.URLError as e:
+            print(
+                f"skillsmp: API error ({last_exc.code}): {msg}", file=sys.stderr
+            )
+    elif isinstance(last_exc, urllib.error.URLError):
         if use_json_errors:
-            json.dump({"error": str(e.reason)}, sys.stdout, indent=2)
+            json.dump({"error": str(last_exc.reason)}, sys.stdout, indent=2)
             print()
         else:
-            print(f"skillsmp: network error: {e.reason}", file=sys.stderr)
-        raise SystemExit(1)
+            print(f"skillsmp: network error: {last_exc.reason}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 # --- formatting ---

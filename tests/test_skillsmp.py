@@ -7,6 +7,7 @@ import json
 import sys
 import textwrap
 import urllib.error
+from contextlib import contextmanager
 from unittest import mock
 
 import pytest
@@ -469,3 +470,118 @@ class TestMainIntegration:
             skillsmp.main()
         semantic = json.loads(capsys.readouterr().out)
         assert semantic["mode"] == "semantic"
+
+
+def _make_http_error(code, reason="Error", body=b""):
+    return urllib.error.HTTPError("http://x", code, reason, {}, io.BytesIO(body))
+
+
+def _make_success_response(data=None):
+    body = json.dumps(data or {"data": {}}).encode()
+    resp = mock.MagicMock()
+    resp.__enter__.return_value = resp
+    resp.read.return_value = body
+    return resp
+
+
+@contextmanager
+def _no_sleep():
+    with mock.patch("skillsmp.time.sleep") as patched:
+        yield patched
+
+
+class TestRetry:
+    def test_retryable_error_succeeds_on_second_attempt(self, capsys):
+        error = _make_http_error(500, "Internal Server Error")
+        success = _make_success_response({"data": {"skills": []}})
+        with _no_sleep() as sleep_mock, mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=[error, success]
+        ):
+            result = skillsmp._api_request("search", {"q": "x"})
+        assert result == {"data": {"skills": []}}
+        assert sleep_mock.call_count == 1
+        assert "retrying" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("code", [500, 502, 503, 504])
+    def test_retryable_status_codes(self, code, capsys):
+        error = _make_http_error(code)
+        success = _make_success_response()
+        with _no_sleep(), mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=[error, success]
+        ):
+            skillsmp._api_request("search", {"q": "x"})
+
+    def test_network_error_retried(self, capsys):
+        error = urllib.error.URLError("Connection refused")
+        success = _make_success_response()
+        with _no_sleep() as sleep_mock, mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=[error, success]
+        ):
+            result = skillsmp._api_request("search", {"q": "x"})
+        assert result == {"data": {}}
+        assert sleep_mock.call_count == 1
+        assert "retrying" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("code", [400, 401, 403, 404, 422, 429])
+    def test_non_retryable_errors_fail_immediately(self, code, capsys):
+        error = _make_http_error(code, body=b'{"error":{"message":"bad"}}')
+        with _no_sleep() as sleep_mock, mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=error
+        ):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._api_request("search", {"q": "x"})
+        assert exc.value.code == 1
+        assert sleep_mock.call_count == 0
+
+    def test_all_retries_exhausted_exits_1(self, capsys):
+        errors = [_make_http_error(500, "Internal") for _ in range(3)]
+        with _no_sleep() as sleep_mock, mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=errors
+        ):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._api_request("search", {"q": "x"})
+        assert exc.value.code == 1
+        assert sleep_mock.call_count == 2
+        err = capsys.readouterr().err
+        assert "retrying" in err
+        assert "API error (500)" in err
+
+    def test_retry_message_shows_retries_left(self, capsys):
+        errors = [_make_http_error(500) for _ in range(3)]
+        with _no_sleep(), mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=errors
+        ):
+            with pytest.raises(SystemExit):
+                skillsmp._api_request("search", {"q": "x"})
+        err = capsys.readouterr().err
+        assert "2 left" in err
+        assert "1 left" in err
+
+    def test_retry_does_not_corrupt_json_output(self, capsys):
+        error = _make_http_error(500, body=b'{"error":{"message":"down"}}')
+        errors = [error] * 3
+        with _no_sleep(), mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=errors
+        ):
+            with pytest.raises(SystemExit):
+                skillsmp._api_request("search", {"q": "x"}, use_json_errors=True)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["code"] == 500
+        assert "retrying" in captured.err
+        assert "retrying" not in captured.out
+
+    def test_retry_delay_uses_exponential_backoff(self):
+        d0 = skillsmp._retry_delay(0)
+        d1 = skillsmp._retry_delay(1)
+        # attempt 0: base * 1.0-1.3 => 1.0-1.3
+        assert 1.0 <= d0 <= 1.3
+        # attempt 1: base * 2 * 1.0-1.3 => 2.0-2.6
+        assert 2.0 <= d1 <= 2.6
+
+    def test_is_retryable(self):
+        assert skillsmp._is_retryable(_make_http_error(500)) is True
+        assert skillsmp._is_retryable(_make_http_error(502)) is True
+        assert skillsmp._is_retryable(_make_http_error(403)) is False
+        assert skillsmp._is_retryable(_make_http_error(429)) is False
+        assert skillsmp._is_retryable(urllib.error.URLError("timeout")) is True
