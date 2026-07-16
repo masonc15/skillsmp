@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import NoReturn
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 MCP_URL = "https://skillsmp.com/mcp"
