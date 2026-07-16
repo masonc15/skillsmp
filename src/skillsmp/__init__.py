@@ -101,14 +101,11 @@ def _die(msg: str) -> NoReturn:
 # --- API key ---
 
 
-def _load_env_file() -> None:
-    """Load SKILLSMP_API_KEY from ~/.env if it is not already set."""
-    if os.environ.get("SKILLSMP_API_KEY"):
-        return
-
+def _read_dotenv_key(name: str) -> str | None:
+    """Read a single variable from ~/.env (handles `export VAR=val` and quotes)."""
     env_path = os.path.join(os.path.expanduser("~"), ".env")
     if not os.path.isfile(env_path):
-        return
+        return None
 
     with open(env_path, encoding="utf-8") as f:
         for line in f:
@@ -116,24 +113,14 @@ def _load_env_file() -> None:
             if not line or line.startswith("#"):
                 continue
 
-            # Handle `export VAR=val` and `VAR=val`.
-            if line.startswith("export "):
-                line = line[7:]
-
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip("\"'")
-
-            if key == "SKILLSMP_API_KEY" and key not in os.environ:
-                os.environ[key] = val
-                return
+            key, _, val = line.removeprefix("export ").partition("=")
+            if key.strip() == name:
+                return val.strip().strip("\"'")
+    return None
 
 
 def _get_api_key() -> str:
-    key = os.environ.get("SKILLSMP_API_KEY", "")
-    if not key:
-        _load_env_file()
-        key = os.environ.get("SKILLSMP_API_KEY", "")
+    key = os.environ.get("SKILLSMP_API_KEY") or _read_dotenv_key("SKILLSMP_API_KEY")
     if not key:
         _die("SKILLSMP_API_KEY not set. Export it or add to ~/.env.")
     return key
