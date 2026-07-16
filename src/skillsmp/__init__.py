@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from typing import NoReturn
 
 __version__ = "1.0.0"
 
@@ -91,7 +92,7 @@ Docs: https://github.com/masonc15/skillsmp
 # --- error handling ---
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     print(f"skillsmp: {msg}", file=sys.stderr)
     print('Try "skillsmp --help" for usage.', file=sys.stderr)
     raise SystemExit(2)
