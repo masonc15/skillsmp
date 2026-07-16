@@ -376,6 +376,21 @@ def _cmd_ai_search(
 # --- argument parsing ---
 
 
+def _take_value(argv: list[str], i: int, flag: str) -> tuple[str, int]:
+    """Consume the next argv element as the value of `flag`."""
+    i += 1
+    if i >= len(argv):
+        _die(f"flag {flag} requires a value")
+    return argv[i], i
+
+
+def _parse_int_flag(name: str, raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        _die(f"{name} must be a number (got: {raw})")
+
+
 def _parse_args(argv: list[str]) -> dict:
     mode = "search"
     limit: int | None = None
@@ -401,20 +416,13 @@ def _parse_args(argv: list[str]) -> dict:
         elif arg == "--plain":
             output_plain = True
         elif arg in ("-n", "--limit"):
-            i += 1
-            if i >= len(argv):
-                _die(f"flag {arg} requires a value")
-            limit = argv[i]  # type: ignore[assignment]
+            raw, i = _take_value(argv, i, arg)
+            limit = _parse_int_flag("--limit", raw)
         elif arg in ("-s", "--sort"):
-            i += 1
-            if i >= len(argv):
-                _die(f"flag {arg} requires a value")
-            sort = argv[i]
+            sort, i = _take_value(argv, i, arg)
         elif arg in ("-p", "--page"):
-            i += 1
-            if i >= len(argv):
-                _die(f"flag {arg} requires a value")
-            page = argv[i]  # type: ignore[assignment]
+            raw, i = _take_value(argv, i, arg)
+            page = _parse_int_flag("--page", raw)
         elif arg == "--":
             i += 1
             query_parts.extend(argv[i:])
@@ -435,19 +443,8 @@ def _parse_args(argv: list[str]) -> dict:
     if output_json and output_plain:
         _die("--json and --plain are mutually exclusive")
 
-    if limit is not None:
-        try:
-            limit = int(limit)
-        except ValueError:
-            _die(f"--limit must be a number (got: {limit})")
-        if not 1 <= limit <= 100:
-            _die(f"--limit must be 1-100 (got: {limit})")
-
-    if page is not None:
-        try:
-            page = int(page)
-        except ValueError:
-            _die(f"--page must be a number (got: {page})")
+    if limit is not None and not 1 <= limit <= 100:
+        _die(f"--limit must be 1-100 (got: {limit})")
 
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
