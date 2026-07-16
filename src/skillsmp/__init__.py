@@ -182,21 +182,18 @@ def _api_request(
             body = json.loads(last_exc.read())
         except Exception:
             pass
-        err = body.get("error", {})
-        msg = err.get("message", last_exc.reason)
-        if use_json_errors:
-            json.dump({"error": msg, "code": last_exc.code}, sys.stdout, indent=2)
-            print()
-        else:
-            print(
-                f"skillsmp: API error ({last_exc.code}): {msg}", file=sys.stderr
-            )
-    elif isinstance(last_exc, urllib.error.URLError):
-        if use_json_errors:
-            json.dump({"error": str(last_exc.reason)}, sys.stdout, indent=2)
-            print()
-        else:
-            print(f"skillsmp: network error: {last_exc.reason}", file=sys.stderr)
+        msg = body.get("error", {}).get("message", last_exc.reason)
+        payload = {"error": msg, "code": last_exc.code}
+        human = f"API error ({last_exc.code}): {msg}"
+    else:
+        payload = {"error": str(last_exc.reason)}
+        human = f"network error: {last_exc.reason}"
+
+    if use_json_errors:
+        json.dump(payload, sys.stdout, indent=2)
+        print()
+    else:
+        print(f"skillsmp: {human}", file=sys.stderr)
     raise SystemExit(1)
 
 
