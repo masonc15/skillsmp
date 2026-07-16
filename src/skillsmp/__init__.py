@@ -469,16 +469,10 @@ def _parse_args(argv: list[str]) -> dict:
 def main() -> None:
     args = _parse_args(sys.argv[1:])
 
-    # Progress indicator for AI search (TTY only, human output only).
-    if (
-        args["mode"] == "ai"
-        and _stderr_is_tty()
-        and not args["json"]
-        and not args["plain"]
-    ):
-        print("Searching (AI)...\r", end="", file=sys.stderr, flush=True)
-
     if args["mode"] == "ai":
+        # Progress indicator (TTY only, human output only).
+        if _stderr_is_tty() and not args["json"] and not args["plain"]:
+            print("Searching (AI)...\r", end="", file=sys.stderr, flush=True)
         _cmd_ai_search(
             args["query"],
             output_json=args["json"],
