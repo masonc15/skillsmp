@@ -238,37 +238,32 @@ def _normalize_skill(skill: dict, score: float | None = None) -> dict:
 
 
 def _print_skill(skill: dict, score: float | None = None) -> None:
-    name = skill.get("name", "unknown")
-    author = skill.get("author", "unknown")
-    stars = _format_stars(skill.get("stars"))
-    updated = _format_timestamp(skill.get("updatedAt"))
-    desc = skill.get("description", "")
-    github = skill.get("githubUrl", "")
-    skillsmp_url = skill.get("skillUrl", "")
+    d = _normalize_skill(skill, score)
 
-    header = f"  {author}/{name}"
+    header = f"  {d['author']}/{d['name']}"
     if score is not None:
         header += f"  (relevance: {score:.2f})"
-    header += f"  [{stars} stars, updated {updated}]"
+    header += f"  [{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}]"
     print(header)
-    if desc:
-        print(f"    {desc[:DESC_DISPLAY_LIMIT]}")
-    if github:
-        print(f"    github: {github}")
-    if skillsmp_url:
-        print(f"    skillsmp: {skillsmp_url}")
+    if d["description"]:
+        print(f"    {d['description'][:DESC_DISPLAY_LIMIT]}")
+    if d["githubUrl"]:
+        print(f"    github: {d['githubUrl']}")
+    if d["skillUrl"]:
+        print(f"    skillsmp: {d['skillUrl']}")
     print()
 
 
 def _print_skill_plain(skill: dict, score: float | None = None) -> None:
+    d = _normalize_skill(skill, score)
     parts = [
-        f"{skill.get('author', 'unknown')}/{skill.get('name', 'unknown')}",
-        str(skill.get("stars", 0)),
-        skill.get("description", "")[:DESC_PLAIN_LIMIT],
-        skill.get("githubUrl", ""),
+        f"{d['author']}/{d['name']}",
+        str(d["stars"]),
+        d["description"][:DESC_PLAIN_LIMIT],
+        d["githubUrl"],
     ]
     if score is not None:
-        parts.append(str(round(score, 4)))
+        parts.append(str(d["relevanceScore"]))
     print("\t".join(parts))
 
 
