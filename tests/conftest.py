@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import urllib.error
 from unittest import mock
 
 import pytest
@@ -9,6 +11,18 @@ import pytest
 import skillsmp
 
 FAKE_API_KEY = "sk-test-1234567890"
+
+
+def make_response(data: dict) -> mock.MagicMock:
+    """Fake urlopen response (context manager with .read())."""
+    response = mock.MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps(data).encode()
+    return response
+
+
+def make_http_error(code: int, reason: str = "Error", body: bytes = b"") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("http://x", code, reason, {}, io.BytesIO(body))
 
 
 @pytest.fixture(autouse=True)
@@ -68,10 +82,8 @@ def make_ai_response(make_skill):
 @pytest.fixture
 def mock_urlopen():
     def _mock_urlopen(response_data: dict):
-        body = json.dumps(response_data).encode()
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = body
-        return mock.patch("skillsmp.urllib.request.urlopen", return_value=response)
+        return mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=make_response(response_data)
+        )
 
     return _mock_urlopen
