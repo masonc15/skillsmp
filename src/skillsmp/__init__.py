@@ -145,17 +145,16 @@ def _api_request(
 ) -> dict:
     api_key = _get_api_key()
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    url = f"{BASE_URL}/{endpoint}?{qs}"
+    req = urllib.request.Request(
+        f"{BASE_URL}/{endpoint}?{qs}",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": f"skillsmp-cli/{__version__}",
+        },
+    )
 
     last_exc: Exception | None = None
     for attempt in range(RETRY_MAX_ATTEMPTS):
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": f"skillsmp-cli/{__version__}",
-            },
-        )
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return json.loads(resp.read())
