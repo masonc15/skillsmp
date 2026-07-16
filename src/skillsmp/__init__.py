@@ -335,7 +335,6 @@ def _cmd_ai_search(
     entries = data.get("data", [])
 
     with_skill = [e for e in entries if e.get("skill")]
-    without_skill = [e for e in entries if not e.get("skill")]
 
     if output_json:
         json.dump(
@@ -369,10 +368,9 @@ def _cmd_ai_search(
         return
     for entry in with_skill:
         _print_skill(entry["skill"], score=entry.get("score"))
-    if without_skill:
-        print(
-            f"  ({len(without_skill)} additional results without full metadata, skipped)"
-        )
+    skipped = len(entries) - len(with_skill)
+    if skipped:
+        print(f"  ({skipped} additional results without full metadata, skipped)")
 
 
 # --- argument parsing ---
