@@ -31,64 +31,94 @@ DESC_PLAIN_LIMIT = 120
 # --- TTY / formatting helpers ---
 
 
+def _isatty(stream) -> bool:
+    return hasattr(stream, "isatty") and stream.isatty()
+
+
 def _stderr_is_tty() -> bool:
-    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+    return _isatty(sys.stderr)
 
 
-def _bold(text: str) -> str:
-    """Wrap text in bold escapes when stderr is a TTY."""
-    if _stderr_is_tty():
-        return f"\033[1m{text}\033[0m"
-    return text
+def _style(text: str, code: str, enabled: bool) -> str:
+    """Wrap text in an ANSI escape sequence when styling is enabled."""
+    return f"\033[{code}m{text}\033[0m" if enabled else text
 
 
 # --- help texts ---
 
 
-def _concise_help() -> str:
-    return f"""\
-{_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+def _concise_help(color: bool) -> str:
+    def bold(t: str) -> str:
+        return _style(t, "1", color)
 
-{_bold("Examples:")}
-  skillsmp terraform
-  skillsmp --ai "how to optimize database queries"
+    def lit(t: str) -> str:
+        return _style(t, "36", color)
+
+    return f"""\
+{bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+
+{bold("Examples:")}
+  {lit("skillsmp terraform")}
+  {lit('skillsmp --ai "how to optimize database queries"')}
 
 Run "skillsmp --help" for all options.
 """
 
 
-def _full_help() -> str:
+def _full_help(color: bool) -> str:
+    def bold(t: str) -> str:
+        return _style(t, "1", color)
+
+    def lit(t: str) -> str:
+        return _style(t, "36", color)
+
+    def dim(t: str) -> str:
+        return _style(t, "2", color)
+
     return f"""\
-{_bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+{bold("skillsmp")} — search the SkillsMP marketplace for agent skills
 
-{_bold("Usage:")}
-  skillsmp [flags] <query ...>
-  skillsmp --ai [flags] <query ...>
+{bold("Usage:")}
+  {lit("skillsmp")} {dim("[flags] <query ...>")}
+  {lit("skillsmp --ai")} {dim("[flags] <query ...>")}
+  {lit("skillsmp show")} {dim("<author>/<skill-name>")}
+  {lit("skillsmp categories")}
+  {lit("skillsmp occupations")}
 
-{_bold("Search modes:")}
-  (default)       Keyword search — fast, supports pagination and sorting
-  -a, --ai        AI semantic search — natural language, relevance-scored
+{bold("Search modes:")}
+  {dim("(default)")}       Keyword search — fast, supports pagination and sorting
+  {lit("-a, --ai")}        AI semantic search — natural language, relevance-scored
 
-{_bold("Flags:")}
-  -n, --limit N   Results per page (1-100, default: 10)
-  -p, --page N    Page number (default: 1)
-  -s, --sort KEY  Sort order: stars, recent (default: stars)
-  -j, --json      Machine-readable JSON output
-      --plain     One-line-per-result output for grep/awk
-  -h, --help      Show this help
-      --version   Show version
+{bold("Commands:")}
+  {lit("show")}            Full details for one skill, including its SKILL.md
+  {lit("categories")}      List category slugs for --category
+  {lit("occupations")}     List occupation slugs for --occupation
 
-  --limit, --page, and --sort apply to keyword search only.
+{bold("Flags:")}
+  {lit("-n, --limit")} {dim("N")}       Results per page (1-100, default: 10)
+  {lit("-p, --page")} {dim("N")}        Page number (default: 1)
+  {lit("-s, --sort")} {dim("KEY")}      Sort order: stars, recent (default: stars)
+      {lit("--category")} {dim("C")}    Filter by category slug (see: skillsmp categories)
+      {lit("--occupation")} {dim("O")}  Filter by occupation slug (see: skillsmp occupations)
+  {lit("-j, --json")}          Machine-readable JSON output
+      {lit("--plain")}         One-line-per-result output for grep/awk
+  {lit("-h, --help")}          Show this help
+      {lit("--version")}       Show version
 
-{_bold("Examples:")}
-  skillsmp terraform
-  skillsmp --ai "how to optimize database queries"
-  skillsmp --limit 5 --sort recent react testing
-  skillsmp --json deployment
-  skillsmp --plain react | grep facebook
+  {dim("--limit, --page, --sort, --category, and --occupation apply to")}
+  {dim("keyword search only.")}
 
-{_bold("Environment:")}
-  SKILLSMP_API_KEY    API key (required). Read from env or ~/.env.
+{bold("Examples:")}
+  {lit("skillsmp terraform")}
+  {lit('skillsmp --ai "how to optimize database queries"')}
+  {lit("skillsmp --limit 5 --sort recent react testing")}
+  {lit("skillsmp --category devops --json deployment")}
+  {lit("skillsmp --occupation lawyers contracts")}
+  {lit("skillsmp show wshobson/terraform-module-library")}
+  {lit("skillsmp --plain react | grep facebook")}
+
+{bold("Environment:")}
+  {lit("SKILLSMP_API_KEY")}    API key (required). Read from env or ~/.env.
 
 Docs: https://github.com/masonc15/skillsmp
 """
@@ -609,7 +639,7 @@ def _parse_args(argv: list[str]) -> dict:
     while i < len(argv):
         arg = argv[i]
         if arg in ("-h", "--help"):
-            print(_full_help())
+            print(_full_help(_isatty(sys.stdout)))
             raise SystemExit(0)
         elif arg == "--version":
             print(f"skillsmp {__version__}")
@@ -648,7 +678,7 @@ def _parse_args(argv: list[str]) -> dict:
 
     # No args at all: concise help.
     if command == "search" and not query_parts:
-        print(_concise_help(), file=sys.stderr)
+        print(_concise_help(_stderr_is_tty()), file=sys.stderr)
         raise SystemExit(2)
 
     # Validate.

@@ -179,21 +179,23 @@ class TestHelpAndVersion:
         assert captured.out.strip() == f"skillsmp {skillsmp.__version__}"
         assert captured.err == ""
 
-    def test_full_help_uses_ansi_bold_when_tty(self, capsys):
-        with mock.patch.object(sys.stderr, "isatty", return_value=True):
+    def test_full_help_styled_when_stdout_is_tty(self, capsys):
+        with mock.patch.object(sys.stdout, "isatty", return_value=True):
             with pytest.raises(SystemExit) as exc:
                 parse_args(["--help"])
         assert_exit_code(exc, 0)
         out = capsys.readouterr().out
         assert "\033[1mskillsmp\033[0m" in out
+        assert "\033[36m" in out
 
-    def test_full_help_no_ansi_when_not_tty(self, capsys):
-        with mock.patch.object(sys.stderr, "isatty", return_value=False):
+    def test_full_help_no_ansi_when_stdout_not_tty(self, capsys):
+        with mock.patch.object(sys.stdout, "isatty", return_value=False), mock.patch.object(
+            sys.stderr, "isatty", return_value=True
+        ):
             with pytest.raises(SystemExit) as exc:
                 parse_args(["--help"])
         assert_exit_code(exc, 0)
-        out = capsys.readouterr().out
-        assert "\033[1m" not in out
+        assert "\033[" not in capsys.readouterr().out
 
     def test_concise_help_uses_ansi_bold_when_tty(self, capsys):
         with mock.patch.object(sys.stderr, "isatty", return_value=True):
@@ -373,13 +375,12 @@ class TestAPIClient:
 
 
 class TestTTYDependentBehavior:
-    def test_bold_wraps_when_stderr_is_tty(self):
-        with mock.patch.object(sys.stderr, "isatty", return_value=True):
-            assert skillsmp._bold("hello") == "\033[1mhello\033[0m"
+    def test_style_wraps_when_enabled(self):
+        assert skillsmp._style("hello", "1", True) == "\033[1mhello\033[0m"
+        assert skillsmp._style("hello", "36", True) == "\033[36mhello\033[0m"
 
-    def test_bold_is_plain_when_stderr_is_not_tty(self):
-        with mock.patch.object(sys.stderr, "isatty", return_value=False):
-            assert skillsmp._bold("hello") == "hello"
+    def test_style_is_plain_when_disabled(self):
+        assert skillsmp._style("hello", "1", False) == "hello"
 
     def test_no_results_hint_shown_on_tty(self, capsys, mock_urlopen, make_keyword_response):
         with mock_urlopen(make_keyword_response(skills=[], total=0)), mock.patch.object(
