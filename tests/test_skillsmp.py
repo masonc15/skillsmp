@@ -95,6 +95,16 @@ class TestArgumentParsing:
         assert parse_args(["--limit", "1", "q"])["limit"] == 1
         assert parse_args(["--limit", "100", "q"])["limit"] == 100
 
+    def test_category_and_occupation_flags(self):
+        parsed = parse_args(["--category", "devops", "--occupation", "lawyers", "q"])
+        assert parsed["category"] == "devops"
+        assert parsed["occupation"] == "lawyers"
+
+    def test_category_and_occupation_default_to_none(self):
+        parsed = parse_args(["q"])
+        assert parsed["category"] is None
+        assert parsed["occupation"] is None
+
 
 class TestSubcommandParsing:
     @pytest.mark.parametrize(
@@ -131,6 +141,9 @@ class TestSubcommandParsing:
             ["categories", "--ai"],
             ["show", "acme/deploy", "--limit", "5"],
             ["categories", "--sort", "recent"],
+            ["--ai", "--category", "devops", "q"],
+            ["--category"],
+            ["--occupation"],
         ],
     )
     def test_subcommand_usage_errors_exit_2(self, argv):
@@ -731,6 +744,22 @@ class TestShowCommand:
         captured = capsys.readouterr()
         assert "acme/terraform-deploy" in captured.out
         assert "could not fetch SKILL.md" in captured.err
+
+
+class TestSearchFilters:
+    def test_category_and_occupation_sent_as_params(self, mock_urlopen):
+        with mock_urlopen({"data": {}}) as patched:
+            skillsmp._cmd_search("q", category="devops", occupation="lawyers")
+        url = patched.call_args.args[0].full_url
+        assert "category=devops" in url
+        assert "occupation=lawyers" in url
+
+    def test_filters_omitted_when_none(self, mock_urlopen):
+        with mock_urlopen({"data": {}}) as patched:
+            skillsmp._cmd_search("q")
+        url = patched.call_args.args[0].full_url
+        assert "category" not in url
+        assert "occupation" not in url
 
 
 class TestSubcommandIntegration:

@@ -328,10 +328,19 @@ def _cmd_search(
     limit: int = 10,
     page: int = 1,
     sort: str = "stars",
+    category: str | None = None,
+    occupation: str | None = None,
     output_json: bool = False,
     output_plain: bool = False,
 ) -> None:
-    params = {"q": query, "limit": limit, "page": page, "sortBy": sort}
+    params = {
+        "q": query,
+        "limit": limit,
+        "page": page,
+        "sortBy": sort,
+        "category": category,
+        "occupation": occupation,
+    }
     result = _api_request("search", params, use_json_errors=output_json)
     data = result.get("data", {})
     skills = data.get("skills", [])
@@ -586,6 +595,8 @@ def _parse_args(argv: list[str]) -> dict:
     limit: int | None = None
     page: int | None = None
     sort: str | None = None
+    category: str | None = None
+    occupation: str | None = None
     output_json = False
     output_plain = False
     query_parts: list[str] = []
@@ -617,6 +628,10 @@ def _parse_args(argv: list[str]) -> dict:
         elif arg in ("-p", "--page"):
             raw, i = _take_value(argv, i, arg)
             page = _parse_int_flag("--page", raw)
+        elif arg == "--category":
+            category, i = _take_value(argv, i, arg)
+        elif arg == "--occupation":
+            occupation, i = _take_value(argv, i, arg)
         elif arg == "--":
             i += 1
             query_parts.extend(argv[i:])
@@ -648,9 +663,14 @@ def _parse_args(argv: list[str]) -> dict:
 
     mode = command if command != "search" else ("ai" if ai else "search")
 
-    if mode != "search" and any(x is not None for x in (limit, page, sort)):
+    if mode != "search" and any(
+        x is not None for x in (limit, page, sort, category, occupation)
+    ):
         target = "--ai search" if mode == "ai" else f"the {mode} command"
-        _die(f"--limit, --page, --sort do not apply to {target}")
+        _die(
+            "--limit, --page, --sort, --category, --occupation "
+            f"do not apply to {target}"
+        )
 
     if command in SUBCOMMANDS and ai:
         _die(f"--ai does not apply to the {command} command")
@@ -672,6 +692,8 @@ def _parse_args(argv: list[str]) -> dict:
         "limit": limit if limit is not None else 10,
         "page": page if page is not None else 1,
         "sort": sort if sort is not None else "stars",
+        "category": category,
+        "occupation": occupation,
         "json": output_json,
         "plain": output_plain,
     }
@@ -705,6 +727,8 @@ def main() -> None:
             limit=args["limit"],
             page=args["page"],
             sort=args["sort"],
+            category=args["category"],
+            occupation=args["occupation"],
             output_json=args["json"],
             output_plain=args["plain"],
         )
