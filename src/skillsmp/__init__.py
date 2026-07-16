@@ -210,7 +210,7 @@ def _format_timestamp(ts: int | str | None) -> str:
             try:
                 return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d")
             except ValueError:
-                return ts[:10] if len(ts) >= 10 else ts
+                return ts[:10]
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
