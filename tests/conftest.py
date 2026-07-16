@@ -13,12 +13,17 @@ import skillsmp
 FAKE_API_KEY = "sk-test-1234567890"
 
 
-def make_response(data: dict) -> mock.MagicMock:
+def make_raw_response(body: bytes) -> mock.MagicMock:
     """Fake urlopen response (context manager with .read())."""
     response = mock.MagicMock()
     response.__enter__.return_value = response
-    response.read.return_value = json.dumps(data).encode()
+    response.read.return_value = body
     return response
+
+
+def make_response(data: dict) -> mock.MagicMock:
+    """Fake urlopen response with a JSON body."""
+    return make_raw_response(json.dumps(data).encode())
 
 
 def make_http_error(code: int, reason: str = "Error", body: bytes = b"") -> urllib.error.HTTPError:

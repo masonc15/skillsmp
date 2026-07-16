@@ -9,7 +9,7 @@ import urllib.error
 from unittest import mock
 
 import pytest
-from conftest import FAKE_API_KEY, make_http_error, make_response
+from conftest import FAKE_API_KEY, make_http_error, make_raw_response, make_response
 
 import skillsmp
 
@@ -94,6 +94,49 @@ class TestArgumentParsing:
     def test_limit_range_boundaries(self):
         assert parse_args(["--limit", "1", "q"])["limit"] == 1
         assert parse_args(["--limit", "100", "q"])["limit"] == 100
+
+
+class TestSubcommandParsing:
+    @pytest.mark.parametrize(
+        ("argv", "mode", "query"),
+        [
+            (["categories"], "categories", ""),
+            (["occupations"], "occupations", ""),
+            (["occupations", "--json"], "occupations", ""),
+            (["show", "acme/deploy"], "show", "acme/deploy"),
+            (["show", "acme/deploy", "--json"], "show", "acme/deploy"),
+        ],
+    )
+    def test_subcommand_modes(self, argv, mode, query):
+        parsed = parse_args(argv)
+        assert parsed["mode"] == mode
+        assert parsed["query"] == query
+
+    def test_double_dash_escapes_subcommand_names(self):
+        parsed = parse_args(["--", "categories"])
+        assert parsed["mode"] == "search"
+        assert parsed["query"] == "categories"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["show"],
+            ["show", "no-slash"],
+            ["show", "acme/"],
+            ["show", "/deploy"],
+            ["show", "acme/deploy", "extra"],
+            ["show", "acme/deploy", "--plain"],
+            ["categories", "extra"],
+            ["occupations", "extra"],
+            ["categories", "--ai"],
+            ["show", "acme/deploy", "--limit", "5"],
+            ["categories", "--sort", "recent"],
+        ],
+    )
+    def test_subcommand_usage_errors_exit_2(self, argv):
+        with pytest.raises(SystemExit) as exc:
+            parse_args(argv)
+        assert_exit_code(exc, 2)
 
 
 class TestHelpAndVersion:
@@ -463,6 +506,260 @@ class TestMainIntegration:
             skillsmp.main()
         semantic = json.loads(capsys.readouterr().out)
         assert semantic["mode"] == "semantic"
+
+
+CATEGORIES_PAYLOAD = {
+    "domains": [
+        {
+            "domain": "devops",
+            "domainName": "DevOps",
+            "categories": [
+                {"slug": "ci-cd", "name": "CI CD", "count": 1200},
+                {"slug": "system-administration", "name": "System Administration", "count": 106011},
+            ],
+        },
+        {
+            "domain": "data-ai",
+            "domainName": "Data & AI",
+            "categories": [{"slug": "llm-ai", "name": "LLM AI", "count": 95606}],
+        },
+    ]
+}
+
+
+def make_mcp_response(payload, sse=False):
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": [{"type": "text", "text": json.dumps(payload)}]},
+    }
+    if sse:
+        return make_raw_response(f"event: message\ndata: {json.dumps(msg)}\n\n".encode())
+    return make_response(msg)
+
+
+OCCUPATIONS_SITEMAP = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://skillsmp.com/occupations/software-developers</loc></url>
+  <url><loc>https://skillsmp.com/occupations/lawyers</loc></url>
+</urlset>
+"""
+
+
+class TestCategoriesCommand:
+    def test_human_output_groups_by_domain(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_mcp_response(CATEGORIES_PAYLOAD),
+        ) as patched:
+            skillsmp._cmd_categories()
+        out = capsys.readouterr().out
+        assert "3 categories across 2 domains" in out
+        assert "DevOps" in out
+        assert "ci-cd" in out
+        assert "106.0k skills" in out
+        assert "--category <slug>" in out
+        request = patched.call_args.args[0]
+        assert request.full_url == skillsmp.MCP_URL
+        body = json.loads(request.data)
+        assert body["params"]["name"] == "list_categories"
+
+    def test_parses_sse_response(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_mcp_response(CATEGORIES_PAYLOAD, sse=True),
+        ):
+            skillsmp._cmd_categories()
+        assert "ci-cd" in capsys.readouterr().out
+
+    def test_json_output_passes_through(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_mcp_response(CATEGORIES_PAYLOAD),
+        ):
+            skillsmp._cmd_categories(output_json=True)
+        assert json.loads(capsys.readouterr().out) == CATEGORIES_PAYLOAD
+
+    def test_plain_output_one_line_per_category(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_mcp_response(CATEGORIES_PAYLOAD),
+        ):
+            skillsmp._cmd_categories(output_plain=True)
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 3
+        assert lines[0].split("\t") == ["ci-cd", "CI CD", "devops", "1200"]
+
+    def test_mcp_error_exits_1(self, capsys):
+        msg = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "boom"}}
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=make_response(msg)
+        ):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._cmd_categories()
+        assert_exit_code(exc, 1)
+        assert "boom" in capsys.readouterr().err
+
+    def test_mcp_tool_error_result_exits_1(self, capsys):
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"isError": True, "content": [{"type": "text", "text": "nope"}]},
+        }
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=make_response(msg)
+        ):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._cmd_categories()
+        assert_exit_code(exc, 1)
+        assert "nope" in capsys.readouterr().err
+
+
+class TestOccupationsCommand:
+    def test_human_output_sorted_with_header(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_raw_response(OCCUPATIONS_SITEMAP),
+        ) as patched:
+            skillsmp._cmd_occupations()
+        out = capsys.readouterr().out
+        assert "2 occupations" in out
+        assert out.index("lawyers") < out.index("software-developers")
+        assert patched.call_args.args[0].full_url == skillsmp.OCCUPATIONS_SITEMAP_URL
+
+    def test_plain_output_slugs_only(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_raw_response(OCCUPATIONS_SITEMAP),
+        ):
+            skillsmp._cmd_occupations(output_plain=True)
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert lines == ["lawyers", "software-developers"]
+
+    def test_json_output(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_raw_response(OCCUPATIONS_SITEMAP),
+        ):
+            skillsmp._cmd_occupations(output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"total": 2, "occupations": ["lawyers", "software-developers"]}
+
+
+class TestGithubRawUrls:
+    def test_tree_url_yields_one_candidate(self):
+        urls = skillsmp._github_raw_urls(
+            "https://github.com/acme/repo/tree/main/plugins/deploy"
+        )
+        assert urls == [
+            "https://raw.githubusercontent.com/acme/repo/main/plugins/deploy/SKILL.md"
+        ]
+
+    def test_root_url_tries_main_then_master(self):
+        urls = skillsmp._github_raw_urls("https://github.com/acme/repo")
+        assert urls == [
+            "https://raw.githubusercontent.com/acme/repo/main/SKILL.md",
+            "https://raw.githubusercontent.com/acme/repo/master/SKILL.md",
+        ]
+
+    def test_non_github_url_yields_nothing(self):
+        assert skillsmp._github_raw_urls("https://gitlab.com/acme/repo") == []
+        assert skillsmp._github_raw_urls("") == []
+
+
+class TestShowCommand:
+    def test_human_output_with_skill_md(self, capsys, make_skill, make_keyword_response):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"# Terraform Deploy\n\nInstructions here."),
+        ]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=responses
+        ) as patched:
+            skillsmp._cmd_show("acme/terraform-deploy")
+        out = capsys.readouterr().out
+        assert "acme/terraform-deploy" in out
+        assert "42 stars" in out
+        assert "Deploy infrastructure with Terraform" in out
+        assert "--- SKILL.md ---" in out
+        assert "Instructions here." in out
+        raw_request = patched.call_args_list[1].args[0]
+        assert raw_request.full_url == (
+            "https://raw.githubusercontent.com/acme/terraform-deploy/main/SKILL.md"
+        )
+
+    def test_match_is_case_insensitive(self, capsys, make_skill, make_keyword_response):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
+            skillsmp._cmd_show("ACME/Terraform-Deploy")
+        assert "acme/terraform-deploy" in capsys.readouterr().out
+
+    def test_json_output_includes_skill_md(self, capsys, make_skill, make_keyword_response):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"# doc"),
+        ]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
+            skillsmp._cmd_show("acme/terraform-deploy", output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert data["name"] == "terraform-deploy"
+        assert data["skillMd"] == "# doc"
+
+    def test_not_found_exits_1(self, capsys, make_keyword_response):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_response(make_keyword_response(skills=[], total=0)),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._cmd_show("acme/nonexistent")
+        assert_exit_code(exc, 1)
+        assert "skill not found: acme/nonexistent" in capsys.readouterr().err
+
+    def test_skill_md_fetch_failure_still_shows_details(
+        self, capsys, make_skill, make_keyword_response
+    ):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_http_error(404, "Not Found"),
+            make_http_error(404, "Not Found"),
+        ]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
+            skillsmp._cmd_show("acme/terraform-deploy")
+        captured = capsys.readouterr()
+        assert "acme/terraform-deploy" in captured.out
+        assert "could not fetch SKILL.md" in captured.err
+
+
+class TestSubcommandIntegration:
+    def test_categories_path(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_mcp_response(CATEGORIES_PAYLOAD),
+        ), mock.patch("sys.argv", ["skillsmp", "categories"]):
+            skillsmp.main()
+        assert "ci-cd" in capsys.readouterr().out
+
+    def test_occupations_path(self, capsys):
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen",
+            return_value=make_raw_response(OCCUPATIONS_SITEMAP),
+        ), mock.patch("sys.argv", ["skillsmp", "occupations"]):
+            skillsmp.main()
+        assert "lawyers" in capsys.readouterr().out
+
+    def test_show_path(self, capsys, make_skill, make_keyword_response):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=responses
+        ), mock.patch("sys.argv", ["skillsmp", "show", "acme/terraform-deploy"]):
+            skillsmp.main()
+        assert "acme/terraform-deploy" in capsys.readouterr().out
 
 
 def _no_sleep():

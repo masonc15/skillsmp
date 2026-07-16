@@ -10,12 +10,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import NoReturn
 
 __version__ = "1.0.0"
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
+MCP_URL = "https://skillsmp.com/mcp"
+OCCUPATIONS_SITEMAP_URL = "https://skillsmp.com/sitemaps/occupations.xml"
+SUBCOMMANDS = ("categories", "occupations", "show")
 REQUEST_TIMEOUT = 30
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
@@ -203,6 +207,48 @@ def _api_request(
     return json.loads(_fetch_with_retry(req, use_json_errors=use_json_errors))
 
 
+def _mcp_call(tool: str, arguments: dict, *, use_json_errors: bool = False) -> dict:
+    """Call a tool on the SkillsMP MCP server (single stateless JSON-RPC POST)."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+    req = urllib.request.Request(
+        MCP_URL,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": f"skillsmp-cli/{__version__}",
+        },
+    )
+    raw = _fetch_with_retry(req, use_json_errors=use_json_errors).decode()
+
+    # The server may answer with plain JSON or a text/event-stream body.
+    text = raw.lstrip()
+    if not text.startswith("{"):
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                text = line[5:]
+                break
+    msg = json.loads(text)
+
+    error = msg.get("error")
+    result = msg.get("result", {})
+    content = result.get("content", [])
+    if error or result.get("isError"):
+        detail = error.get("message") if error else content[0].get("text", "unknown")
+        if use_json_errors:
+            json.dump({"error": f"MCP error: {detail}"}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"skillsmp: MCP error: {detail}", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(content[0]["text"])
+
+
 # --- formatting ---
 
 
@@ -379,6 +425,143 @@ def _cmd_ai_search(
         print(f"  ({skipped} additional results without full metadata, skipped)")
 
 
+def _cmd_categories(*, output_json: bool = False, output_plain: bool = False) -> None:
+    data = _mcp_call("list_categories", {}, use_json_errors=output_json)
+    domains = data.get("domains", [])
+
+    if output_json:
+        json.dump(data, sys.stdout, indent=2)
+        print()
+        return
+
+    if output_plain:
+        for domain in domains:
+            for cat in domain.get("categories", []):
+                parts = [
+                    cat.get("slug", ""),
+                    cat.get("name", ""),
+                    domain.get("domain", ""),
+                    str(cat.get("count", 0)),
+                ]
+                print("\t".join(parts))
+        return
+
+    total = sum(len(d.get("categories", [])) for d in domains)
+    print(f"{total} categories across {len(domains)} domains\n")
+    for domain in domains:
+        print(f"{domain.get('domainName', domain.get('domain', 'unknown'))}")
+        for cat in domain.get("categories", []):
+            count = _format_stars(cat.get("count"))
+            print(f"  {cat.get('slug', ''):<32} {count:>7} skills")
+        print()
+    print('Filter searches with: skillsmp --category <slug> <query>')
+
+
+def _cmd_occupations(*, output_json: bool = False, output_plain: bool = False) -> None:
+    req = urllib.request.Request(
+        OCCUPATIONS_SITEMAP_URL,
+        headers={"User-Agent": f"skillsmp-cli/{__version__}"},
+    )
+    raw = _fetch_with_retry(req, use_json_errors=output_json)
+
+    ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    slugs = sorted(
+        loc.text.rsplit("/", 1)[1]
+        for loc in ET.fromstring(raw).iter(f"{ns}loc")
+        if loc.text and "/occupations/" in loc.text
+    )
+
+    if output_json:
+        json.dump({"total": len(slugs), "occupations": slugs}, sys.stdout, indent=2)
+        print()
+        return
+
+    if not output_plain:
+        print(
+            f"{len(slugs)} occupations "
+            "(filter searches with: skillsmp --occupation <slug> <query>)\n"
+        )
+    for slug in slugs:
+        print(slug)
+
+
+def _github_raw_urls(github_url: str) -> list[str]:
+    """Candidate raw.githubusercontent.com URLs for a skill's SKILL.md."""
+    prefix = "https://github.com/"
+    if not github_url.startswith(prefix):
+        return []
+    rest = github_url[len(prefix):].rstrip("/")
+    if "/tree/" in rest:
+        repo, tree = rest.split("/tree/", 1)
+        return [f"https://raw.githubusercontent.com/{repo}/{tree}/SKILL.md"]
+    return [
+        f"https://raw.githubusercontent.com/{rest}/{branch}/SKILL.md"
+        for branch in ("main", "master")
+    ]
+
+
+def _fetch_skill_md(github_url: str) -> str | None:
+    for url in _github_raw_urls(github_url):
+        req = urllib.request.Request(
+            url, headers={"User-Agent": f"skillsmp-cli/{__version__}"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            continue
+    return None
+
+
+def _cmd_show(spec: str, *, output_json: bool = False) -> None:
+    author, _, name = spec.partition("/")
+    result = _api_request("search", {"q": name, "limit": 50}, use_json_errors=output_json)
+    skills = result.get("data", {}).get("skills", [])
+    matches = [
+        s
+        for s in skills
+        if s.get("author", "").lower() == author.lower()
+        and s.get("name", "").lower() == name.lower()
+    ]
+
+    if not matches:
+        if output_json:
+            json.dump({"error": f"skill not found: {spec}"}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"skillsmp: skill not found: {spec}", file=sys.stderr)
+        raise SystemExit(1)
+
+    skill = matches[0]
+    d = _normalize_skill(skill)
+    skill_md = _fetch_skill_md(d["githubUrl"])
+
+    if output_json:
+        d["skillMd"] = skill_md
+        json.dump(d, sys.stdout, indent=2)
+        print()
+        return
+
+    stars = _format_stars(d["stars"])
+    updated = _format_timestamp(d["updatedAt"])
+    print(f"{d['author']}/{d['name']}  [{stars} stars, updated {updated}]\n")
+    if d["description"]:
+        print(f"{d['description']}\n")
+    if d["githubUrl"]:
+        print(f"github:   {d['githubUrl']}")
+    if d["skillUrl"]:
+        print(f"skillsmp: {d['skillUrl']}")
+    if len(matches) > 1:
+        print(
+            f"skillsmp: {len(matches) - 1} more skills matched {spec}, showing the top result",
+            file=sys.stderr,
+        )
+    if skill_md is not None:
+        print(f"\n--- SKILL.md ---\n{skill_md}")
+    else:
+        print("skillsmp: could not fetch SKILL.md from GitHub", file=sys.stderr)
+
+
 # --- argument parsing ---
 
 
@@ -398,13 +581,18 @@ def _parse_int_flag(name: str, raw: str) -> int:
 
 
 def _parse_args(argv: list[str]) -> dict:
-    mode = "search"
+    command = "search"
+    ai = False
     limit: int | None = None
     page: int | None = None
     sort: str | None = None
     output_json = False
     output_plain = False
     query_parts: list[str] = []
+
+    if argv and argv[0] in SUBCOMMANDS:
+        command = argv[0]
+        argv = argv[1:]
 
     i = 0
     while i < len(argv):
@@ -416,7 +604,7 @@ def _parse_args(argv: list[str]) -> dict:
             print(f"skillsmp {__version__}")
             raise SystemExit(0)
         elif arg in ("-a", "--ai"):
-            mode = "ai"
+            ai = True
         elif arg in ("-j", "--json"):
             output_json = True
         elif arg == "--plain":
@@ -435,13 +623,16 @@ def _parse_args(argv: list[str]) -> dict:
             break
         elif arg.startswith("-"):
             _die(f"unknown flag: {arg}")
-        else:
+        elif command == "search":
+            # Everything from the first positional on is the query.
             query_parts.extend(argv[i:])
             break
+        else:
+            query_parts.append(arg)
         i += 1
 
     # No args at all: concise help.
-    if not query_parts:
+    if command == "search" and not query_parts:
         print(_concise_help(), file=sys.stderr)
         raise SystemExit(2)
 
@@ -455,8 +646,25 @@ def _parse_args(argv: list[str]) -> dict:
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
 
-    if mode == "ai" and any(x is not None for x in (limit, page, sort)):
-        _die("--limit, --page, --sort do not apply to --ai search")
+    mode = command if command != "search" else ("ai" if ai else "search")
+
+    if mode != "search" and any(x is not None for x in (limit, page, sort)):
+        target = "--ai search" if mode == "ai" else f"the {mode} command"
+        _die(f"--limit, --page, --sort do not apply to {target}")
+
+    if command in SUBCOMMANDS and ai:
+        _die(f"--ai does not apply to the {command} command")
+
+    if command in ("categories", "occupations") and query_parts:
+        _die(f"the {command} command takes no arguments")
+
+    if command == "show":
+        spec = query_parts[0] if query_parts else ""
+        author, _, name = spec.partition("/")
+        if len(query_parts) != 1 or not author or not name:
+            _die("show requires a <author>/<skill-name> argument")
+        if output_plain:
+            _die("--plain does not apply to the show command")
 
     return {
         "mode": mode,
@@ -474,8 +682,15 @@ def _parse_args(argv: list[str]) -> dict:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    mode = args["mode"]
 
-    if args["mode"] == "ai":
+    if mode == "categories":
+        _cmd_categories(output_json=args["json"], output_plain=args["plain"])
+    elif mode == "occupations":
+        _cmd_occupations(output_json=args["json"], output_plain=args["plain"])
+    elif mode == "show":
+        _cmd_show(args["query"], output_json=args["json"])
+    elif mode == "ai":
         # Progress indicator (TTY only, human output only).
         if _stderr_is_tty() and not args["json"] and not args["plain"]:
             print("Searching (AI)...\r", end="", file=sys.stderr, flush=True)
