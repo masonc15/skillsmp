@@ -140,24 +140,15 @@ def _retry_delay(attempt: int) -> float:
     return delay * random.uniform(1.0, 1.3)
 
 
-def _api_request(
-    endpoint: str, params: dict, *, use_json_errors: bool = False
-) -> dict:
-    api_key = _get_api_key()
-    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    req = urllib.request.Request(
-        f"{BASE_URL}/{endpoint}?{qs}",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": f"skillsmp-cli/{__version__}",
-        },
-    )
-
+def _fetch_with_retry(
+    req: urllib.request.Request, *, use_json_errors: bool = False
+) -> bytes:
+    """GET/POST with retries; on failure, report the error and exit 1."""
     last_exc: Exception | None = None
     for attempt in range(RETRY_MAX_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read())
+                return resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
             last_exc = e
             is_last = attempt == RETRY_MAX_ATTEMPTS - 1
@@ -195,6 +186,21 @@ def _api_request(
     else:
         print(f"skillsmp: {human}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def _api_request(
+    endpoint: str, params: dict, *, use_json_errors: bool = False
+) -> dict:
+    api_key = _get_api_key()
+    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    req = urllib.request.Request(
+        f"{BASE_URL}/{endpoint}?{qs}",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": f"skillsmp-cli/{__version__}",
+        },
+    )
+    return json.loads(_fetch_with_retry(req, use_json_errors=use_json_errors))
 
 
 # --- formatting ---
