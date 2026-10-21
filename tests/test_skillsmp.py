@@ -824,6 +824,17 @@ class TestSearchFilters:
         assert "language=en" in url
 
 
+class TestBrokenPipe:
+    def test_closed_stdout_exits_quietly(self):
+        with mock.patch("skillsmp._run", side_effect=BrokenPipeError), mock.patch(
+            "skillsmp.os.dup2"
+        ) as dup2:
+            with pytest.raises(SystemExit) as exc:
+                skillsmp.main()
+        assert_exit_code(exc, 141)
+        assert dup2.call_count == 1
+
+
 class TestSubcommandIntegration:
     def test_categories_path(self, capsys):
         with mock.patch(

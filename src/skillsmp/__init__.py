@@ -693,6 +693,19 @@ def _parse_args(argv: list[str]) -> dict:
 
 
 def main() -> None:
+    try:
+        _run()
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader went away (e.g. `skillsmp occupations | head`). Point
+        # stdout at devnull so the interpreter's final flush can't raise again,
+        # then exit like a process killed by SIGPIPE.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        raise SystemExit(141)
+
+
+def _run() -> None:
     args = _parse_args(sys.argv[1:])
     mode = args["mode"]
 
