@@ -31,7 +31,7 @@ Issues = "https://github.com/masonc15/skillsmp/issues"
 skillsmp = "skillsmp:main"
 
 [build-system]
-requires = ["uv_build>=0.10.2,<0.11.0"]
+requires = ["uv_build>=0.13.3,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
