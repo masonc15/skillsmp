@@ -734,6 +734,38 @@ class TestShowCommand:
             skillsmp._cmd_show("acme/terraform-deploy")
         assert "q=acme+terraform-deploy" in patched.call_args_list[0].args[0].full_url
 
+    def test_prefers_english_variant_and_lists_others(
+        self, capsys, make_skill, make_keyword_response
+    ):
+        skills = [
+            make_skill(contentLanguage="es", skillUrl="https://skillsmp.com/es"),
+            make_skill(contentLanguage="en", skillUrl="https://skillsmp.com/en"),
+        ]
+        responses = [
+            make_response(make_keyword_response(skills=skills)),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
+            skillsmp._cmd_show("acme/terraform-deploy")
+        captured = capsys.readouterr()
+        assert "skillsmp: https://skillsmp.com/en" in captured.out
+        assert "https://skillsmp.com/es  (es)" in captured.err
+
+    def test_json_lists_other_matches(self, capsys, make_skill, make_keyword_response):
+        skills = [
+            make_skill(contentLanguage="en", skillUrl="https://skillsmp.com/en"),
+            make_skill(contentLanguage="ja", skillUrl="https://skillsmp.com/ja"),
+        ]
+        responses = [
+            make_response(make_keyword_response(skills=skills)),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
+            skillsmp._cmd_show("acme/terraform-deploy", output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert data["skillUrl"] == "https://skillsmp.com/en"
+        assert data["otherMatches"] == ["https://skillsmp.com/ja"]
+
     def test_falls_back_to_name_only_search(
         self, capsys, make_skill, make_keyword_response
     ):

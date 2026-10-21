@@ -509,7 +509,7 @@ def _fetch_skill_md(github_url: str) -> str | None:
 
 
 def _find_skill(author: str, name: str, *, use_json_errors: bool = False) -> list[dict]:
-    """Search for skills named exactly author/name, most-starred first."""
+    """Search for skills named exactly author/name, English and most-starred first."""
     # Searching by name alone ranks by stars, so a low-star copy of a common
     # name (say, code-review) falls past the first page. Including the author
     # in the query finds it; the name-only query is a fallback.
@@ -524,7 +524,8 @@ def _find_skill(author: str, name: str, *, use_json_errors: bool = False) -> lis
             and s.get("name", "").lower() == name.lower()
         ]
         if matches:
-            return matches
+            # Translations share author/name; show the English one first.
+            return sorted(matches, key=lambda s: s.get("contentLanguage") not in ("en", None))
     return []
 
 
@@ -540,12 +541,13 @@ def _cmd_show(spec: str, *, output_json: bool = False) -> None:
             print(f"skillsmp: skill not found: {spec}", file=sys.stderr)
         raise SystemExit(1)
 
-    skill = matches[0]
-    d = _normalize_skill(skill)
+    d = _normalize_skill(matches[0])
+    others = [_normalize_skill(s) for s in matches[1:]]
     skill_md = _fetch_skill_md(d["githubUrl"])
 
     if output_json:
         d["skillMd"] = skill_md
+        d["otherMatches"] = [o["skillUrl"] for o in others]
         json.dump(d, sys.stdout, indent=2)
         print()
         return
@@ -559,11 +561,11 @@ def _cmd_show(spec: str, *, output_json: bool = False) -> None:
         print(f"github:   {d['githubUrl']}")
     if d["skillUrl"]:
         print(f"skillsmp: {d['skillUrl']}")
-    if len(matches) > 1:
-        print(
-            f"skillsmp: {len(matches) - 1} more skills matched {spec}, showing the top result",
-            file=sys.stderr,
-        )
+    if others:
+        print(f"skillsmp: {spec} also matched (showing the top result):", file=sys.stderr)
+        for o in others:
+            lang = o["contentLanguage"] or "unknown language"
+            print(f"  {o['skillUrl']}  ({lang})", file=sys.stderr)
     if skill_md is not None:
         print(f"\n--- SKILL.md ---\n{skill_md}")
     else:
