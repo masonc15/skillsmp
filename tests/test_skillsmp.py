@@ -561,6 +561,7 @@ class TestCategoriesCommand:
         assert "106.0k skills" in out
         request = patched.call_args.args[0]
         assert request.full_url == skillsmp.MCP_URL
+        assert request.get_header("Mcp-protocol-version") == skillsmp.MCP_PROTOCOL_VERSION
         body = json.loads(request.data)
         assert body["params"]["name"] == "list_categories"
 

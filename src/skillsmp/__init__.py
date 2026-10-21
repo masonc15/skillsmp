@@ -18,6 +18,7 @@ __version__ = "1.2.0"
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 MCP_URL = "https://skillsmp.com/mcp"
+MCP_PROTOCOL_VERSION = "2025-06-18"
 OCCUPATIONS_SITEMAP_URL = "https://skillsmp.com/sitemaps/occupations.xml"
 SUBCOMMANDS = ("categories", "occupations", "show")
 REQUEST_TIMEOUT = 30
@@ -246,6 +247,7 @@ def _mcp_call(tool: str, arguments: dict, *, use_json_errors: bool = False) -> d
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             "User-Agent": f"skillsmp-cli/{__version__}",
         },
     )
