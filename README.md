@@ -66,7 +66,7 @@ skillsmp show --json wshobson/terraform-module-library
 
 ```
 -a, --ai        AI semantic search
--n, --limit N   Results per page (1-100, default: 10)
+-n, --limit N   Results per page (1-50, default: 10)
 -p, --page N    Page number (default: 1)
 -s, --sort KEY  Sort by: stars, recent (default: stars)
 -j, --json      JSON output

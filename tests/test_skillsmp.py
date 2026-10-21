@@ -73,7 +73,7 @@ class TestArgumentParsing:
             ["--json", "--plain", "q"],
             ["--limit", "abc", "q"],
             ["--limit", "0", "q"],
-            ["--limit", "101", "q"],
+            ["--limit", "51", "q"],
             ["--limit", "999999", "q"],
             ["--page", "abc", "q"],
             ["--sort", "name", "q"],
@@ -93,7 +93,7 @@ class TestArgumentParsing:
 
     def test_limit_range_boundaries(self):
         assert parse_args(["--limit", "1", "q"])["limit"] == 1
-        assert parse_args(["--limit", "100", "q"])["limit"] == 100
+        assert parse_args(["--limit", "50", "q"])["limit"] == 50
 
 
 class TestSubcommandParsing:
@@ -198,7 +198,7 @@ class TestErrorMessages:
         [
             (["--bogus", "q"], "unknown flag: --bogus"),
             (["--json", "--plain", "q"], "mutually exclusive"),
-            (["--limit", "200", "q"], "1-100"),
+            (["--limit", "200", "q"], "1-50"),
             (["--sort", "name", "q"], "'stars' or 'recent'"),
             (["--ai", "--limit", "5", "q"], "do not apply"),
         ],

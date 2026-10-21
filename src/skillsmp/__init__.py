@@ -26,6 +26,7 @@ RETRY_MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 4.0
 _RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+MAX_LIMIT = 50
 DESC_DISPLAY_LIMIT = 200
 DESC_PLAIN_LIMIT = 120
 
@@ -96,7 +97,7 @@ def _full_help(color: bool) -> str:
   {lit("occupations")}     List SOC occupation slugs
 
 {bold("Flags:")}
-  {lit("-n, --limit")} {dim("N")}   Results per page (1-100, default: 10)
+  {lit("-n, --limit")} {dim("N")}   Results per page (1-50, default: 10)
   {lit("-p, --page")} {dim("N")}    Page number (default: 1)
   {lit("-s, --sort")} {dim("KEY")}  Sort order: stars, recent (default: stars)
   {lit("-j, --json")}      Machine-readable JSON output
@@ -538,7 +539,7 @@ def _fetch_skill_md(github_url: str) -> str | None:
 
 def _cmd_show(spec: str, *, output_json: bool = False) -> None:
     author, _, name = spec.partition("/")
-    result = _api_request("search", {"q": name, "limit": 50}, use_json_errors=output_json)
+    result = _api_request("search", {"q": name, "limit": MAX_LIMIT}, use_json_errors=output_json)
     skills = result.get("data", {}).get("skills", [])
     matches = [
         s
@@ -663,8 +664,8 @@ def _parse_args(argv: list[str]) -> dict:
     if output_json and output_plain:
         _die("--json and --plain are mutually exclusive")
 
-    if limit is not None and not 1 <= limit <= 100:
-        _die(f"--limit must be 1-100 (got: {limit})")
+    if limit is not None and not 1 <= limit <= MAX_LIMIT:
+        _die(f"--limit must be 1-{MAX_LIMIT} (got: {limit})")
 
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
