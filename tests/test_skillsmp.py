@@ -28,8 +28,6 @@ class TestArgumentParsing:
         [
             (["terraform"], {"mode": "search", "query": "terraform"}),
             (["react", "testing", "library"], {"query": "react testing library"}),
-            (["--ai", "optimize queries"], {"mode": "ai"}),
-            (["-a", "optimize queries"], {"mode": "ai"}),
             (["--json", "q"], {"json": True}),
             (["-j", "q"], {"json": True}),
             (["--plain", "q"], {"plain": True}),
@@ -80,9 +78,8 @@ class TestArgumentParsing:
             ["--limit"],
             ["--page"],
             ["--sort"],
-            ["--ai", "--limit", "5", "q"],
-            ["--ai", "--page", "2", "q"],
-            ["--ai", "--sort", "recent", "q"],
+            ["--ai", "q"],
+            ["-a", "q"],
             ["--limit", "5"],
         ],
     )
@@ -200,7 +197,8 @@ class TestErrorMessages:
             (["--json", "--plain", "q"], "mutually exclusive"),
             (["--limit", "200", "q"], "1-50"),
             (["--sort", "name", "q"], "'stars' or 'recent'"),
-            (["--ai", "--limit", "5", "q"], "do not apply"),
+            (["--ai", "q"], "retired"),
+            (["show", "acme/x", "--limit", "5"], "do not apply"),
         ],
     )
     def test_usage_errors_are_actionable(self, argv, needle, capsys):
@@ -252,51 +250,6 @@ class TestKeywordOutput:
         with mock_urlopen(make_keyword_response(skills=[], total=0)):
             skillsmp._cmd_search("none")
         assert "No results found" in capsys.readouterr().out
-
-
-class TestAIOutput:
-    def test_human_output(self, capsys, mock_urlopen, make_ai_response):
-        with mock_urlopen(make_ai_response()):
-            skillsmp._cmd_ai_search("optimize")
-        out = capsys.readouterr().out
-        assert "AI search:" in out
-        assert "relevance: 0.95" in out
-
-    def test_json_output(self, capsys, mock_urlopen, make_ai_response):
-        with mock_urlopen(make_ai_response()):
-            skillsmp._cmd_ai_search("optimize", output_json=True)
-        data = json.loads(capsys.readouterr().out)
-        assert data["mode"] == "semantic"
-        assert data["skills"][0]["relevanceScore"] == 0.95
-
-    def test_plain_output(self, capsys, mock_urlopen, make_ai_response):
-        with mock_urlopen(make_ai_response()):
-            skillsmp._cmd_ai_search("optimize", output_plain=True)
-        parts = capsys.readouterr().out.strip().split("\t")
-        assert parts[0] == "acme/terraform-deploy"
-        assert parts[-1] == "0.95"
-
-    def test_plain_output_with_multiple_results_prints_one_line_each(
-        self, capsys, mock_urlopen, make_ai_response, make_skill
-    ):
-        entries = [
-            {"skill": make_skill(name="one"), "score": 0.9},
-            {"skill": make_skill(name="two"), "score": 0.8},
-        ]
-        with mock_urlopen(make_ai_response(entries=entries)):
-            skillsmp._cmd_ai_search("q", output_plain=True)
-        lines = capsys.readouterr().out.strip().splitlines()
-        assert len(lines) == 2
-        assert lines[0].startswith("acme/one\t")
-        assert lines[1].startswith("acme/two\t")
-
-    def test_results_without_metadata_are_reported(
-        self, capsys, mock_urlopen, make_ai_response, make_skill
-    ):
-        entries = [{"skill": make_skill(), "score": 0.9}, {"score": 0.5}]
-        with mock_urlopen(make_ai_response(entries=entries)):
-            skillsmp._cmd_ai_search("q")
-        assert "without full metadata" in capsys.readouterr().out
 
 
 class TestAPIClient:
@@ -385,22 +338,6 @@ class TestTTYDependentBehavior:
             skillsmp._cmd_search("none")
         assert "Tip:" not in capsys.readouterr().err
 
-    def test_ai_progress_indicator_on_tty(self, capsys, mock_urlopen, make_ai_response):
-        with mock_urlopen(make_ai_response()), mock.patch("skillsmp._stderr_is_tty", return_value=True), mock.patch(
-            "sys.argv", ["skillsmp", "--ai", "query"]
-        ):
-            skillsmp.main()
-        assert "Searching (AI)..." in capsys.readouterr().err
-
-    def test_ai_progress_indicator_not_shown_for_json_mode(
-        self, capsys, mock_urlopen, make_ai_response
-    ):
-        with mock_urlopen(make_ai_response()), mock.patch("skillsmp._stderr_is_tty", return_value=True), mock.patch(
-            "sys.argv", ["skillsmp", "--ai", "--json", "query"]
-        ):
-            skillsmp.main()
-        assert "Searching" not in capsys.readouterr().err
-
 
 class TestFormattingHelpers:
     def test_format_stars(self):
@@ -413,15 +350,11 @@ class TestFormattingHelpers:
         assert skillsmp._format_timestamp(0) == "unknown"
         assert skillsmp._format_timestamp(1700000000) == "2023-11-14"
 
-    def test_normalize_skill_defaults_and_score(self, make_skill):
+    def test_normalize_skill_defaults(self):
         defaults = skillsmp._normalize_skill({})
         assert defaults["name"] == "unknown"
         assert defaults["author"] == "unknown"
         assert defaults["stars"] == 0
-        assert "relevanceScore" not in defaults
-
-        with_score = skillsmp._normalize_skill(make_skill(), score=0.87654)
-        assert with_score["relevanceScore"] == 0.8765
 
     def test_description_truncation(self, capsys, make_skill):
         skillsmp._print_skill(make_skill(description="x" * 300))
@@ -488,25 +421,13 @@ class TestMainIntegration:
             skillsmp.main()
         assert "Keyword search:" in capsys.readouterr().out
 
-    def test_ai_search_path(self, capsys, mock_urlopen, make_ai_response):
-        with mock_urlopen(make_ai_response()), mock.patch("sys.argv", ["skillsmp", "--ai", "deploy"]):
-            skillsmp.main()
-        assert "AI search:" in capsys.readouterr().out
-
-    def test_json_mode_paths(self, capsys, mock_urlopen, make_keyword_response, make_ai_response):
+    def test_json_mode_path(self, capsys, mock_urlopen, make_keyword_response):
         with mock_urlopen(make_keyword_response()), mock.patch(
             "sys.argv", ["skillsmp", "--json", "terraform"]
         ):
             skillsmp.main()
         keyword = json.loads(capsys.readouterr().out)
         assert keyword["mode"] == "keyword"
-
-        with mock_urlopen(make_ai_response()), mock.patch(
-            "sys.argv", ["skillsmp", "--ai", "--json", "deploy"]
-        ):
-            skillsmp.main()
-        semantic = json.loads(capsys.readouterr().out)
-        assert semantic["mode"] == "semantic"
 
 
 CATEGORIES_PAYLOAD = {

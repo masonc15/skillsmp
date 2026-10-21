@@ -61,7 +61,7 @@ def _concise_help(color: bool) -> str:
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
-  {lit('skillsmp --ai "how to optimize database queries"')}
+  {lit("skillsmp --limit 5 --sort recent react testing")}
 
 Run "skillsmp --help" for all options.
 """
@@ -82,14 +82,9 @@ def _full_help(color: bool) -> str:
 
 {bold("Usage:")}
   {lit("skillsmp")} {dim("[flags] <query ...>")}
-  {lit("skillsmp --ai")} {dim("[flags] <query ...>")}
   {lit("skillsmp show")} {dim("<author>/<skill-name>")}
   {lit("skillsmp categories")}
   {lit("skillsmp occupations")}
-
-{bold("Search modes:")}
-  {dim("(default)")}       Keyword search — fast, supports pagination and sorting
-  {lit("-a, --ai")}        AI semantic search — natural language, relevance-scored
 
 {bold("Commands:")}
   {lit("show")}            Full details for one skill, including its SKILL.md
@@ -105,11 +100,10 @@ def _full_help(color: bool) -> str:
   {lit("-h, --help")}      Show this help
       {lit("--version")}   Show version
 
-  {dim("--limit, --page, and --sort apply to keyword search only.")}
+  {dim("--limit, --page, and --sort apply to search only.")}
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
-  {lit('skillsmp --ai "how to optimize database queries"')}
   {lit("skillsmp --limit 5 --sort recent react testing")}
   {lit("skillsmp show wshobson/terraform-module-library")}
   {lit("skillsmp --plain react | grep facebook")}
@@ -302,8 +296,8 @@ def _format_stars(n: int | None) -> str:
     return str(n)
 
 
-def _normalize_skill(skill: dict, score: float | None = None) -> dict:
-    d = {
+def _normalize_skill(skill: dict) -> dict:
+    return {
         "name": skill.get("name", "unknown"),
         "author": skill.get("author", "unknown"),
         "description": skill.get("description", ""),
@@ -312,17 +306,12 @@ def _normalize_skill(skill: dict, score: float | None = None) -> dict:
         "githubUrl": skill.get("githubUrl", ""),
         "skillUrl": skill.get("skillUrl", ""),
     }
-    if score is not None:
-        d["relevanceScore"] = round(score, 4)
-    return d
 
 
-def _print_skill(skill: dict, score: float | None = None) -> None:
-    d = _normalize_skill(skill, score)
+def _print_skill(skill: dict) -> None:
+    d = _normalize_skill(skill)
 
     header = f"  {d['author']}/{d['name']}"
-    if score is not None:
-        header += f"  (relevance: {score:.2f})"
     header += f"  [{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}]"
     print(header)
     if d["description"]:
@@ -334,16 +323,14 @@ def _print_skill(skill: dict, score: float | None = None) -> None:
     print()
 
 
-def _print_skill_plain(skill: dict, score: float | None = None) -> None:
-    d = _normalize_skill(skill, score)
+def _print_skill_plain(skill: dict) -> None:
+    d = _normalize_skill(skill)
     parts = [
         f"{d['author']}/{d['name']}",
         str(d["stars"]),
         d["description"][:DESC_PLAIN_LIMIT],
         d["githubUrl"],
     ]
-    if score is not None:
-        parts.append(str(d["relevanceScore"]))
     print("\t".join(parts))
 
 
@@ -394,63 +381,10 @@ def _cmd_search(
     if not skills:
         print("  No results found.")
         if _stderr_is_tty():
-            print(
-                f'\n  Tip: try "skillsmp --ai {query}" for semantic search.',
-                file=sys.stderr,
-            )
+            print("\n  Tip: try fewer or broader keywords.", file=sys.stderr)
         return
     for s in skills:
         _print_skill(s)
-
-
-def _cmd_ai_search(
-    query: str,
-    *,
-    output_json: bool = False,
-    output_plain: bool = False,
-) -> None:
-    params = {"q": query}
-    result = _api_request("ai-search", params, use_json_errors=output_json)
-    data = result.get("data", {})
-    entries = data.get("data", [])
-
-    with_skill = [e for e in entries if e.get("skill")]
-
-    if output_json:
-        json.dump(
-            {
-                "query": query,
-                "mode": "semantic",
-                "total": len(entries),
-                "withMetadata": len(with_skill),
-                "skills": [
-                    _normalize_skill(e["skill"], score=e.get("score"))
-                    for e in with_skill
-                ],
-            },
-            sys.stdout,
-            indent=2,
-        )
-        print()
-        return
-
-    if output_plain:
-        for entry in with_skill:
-            _print_skill_plain(entry["skill"], score=entry.get("score"))
-        return
-
-    print(
-        f'AI search: "{query}" — {len(entries)} results '
-        f"({len(with_skill)} with metadata)\n"
-    )
-    if not entries:
-        print("  No results found.")
-        return
-    for entry in with_skill:
-        _print_skill(entry["skill"], score=entry.get("score"))
-    skipped = len(entries) - len(with_skill)
-    if skipped:
-        print(f"  ({skipped} additional results without full metadata, skipped)")
 
 
 def _cmd_categories(*, output_json: bool = False, output_plain: bool = False) -> None:
@@ -606,7 +540,6 @@ def _parse_int_flag(name: str, raw: str) -> int:
 
 def _parse_args(argv: list[str]) -> dict:
     command = "search"
-    ai = False
     limit: int | None = None
     page: int | None = None
     sort: str | None = None
@@ -628,7 +561,7 @@ def _parse_args(argv: list[str]) -> dict:
             print(f"skillsmp {__version__}")
             raise SystemExit(0)
         elif arg in ("-a", "--ai"):
-            ai = True
+            _die("AI semantic search was retired by SkillsMP; use keyword search instead")
         elif arg in ("-j", "--json"):
             output_json = True
         elif arg == "--plain":
@@ -670,14 +603,8 @@ def _parse_args(argv: list[str]) -> dict:
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
 
-    mode = command if command != "search" else ("ai" if ai else "search")
-
-    if mode != "search" and any(x is not None for x in (limit, page, sort)):
-        target = "--ai search" if mode == "ai" else f"the {mode} command"
-        _die(f"--limit, --page, --sort do not apply to {target}")
-
-    if command in SUBCOMMANDS and ai:
-        _die(f"--ai does not apply to the {command} command")
+    if command != "search" and any(x is not None for x in (limit, page, sort)):
+        _die(f"--limit, --page, --sort do not apply to the {command} command")
 
     if command in ("categories", "occupations") and query_parts:
         _die(f"the {command} command takes no arguments")
@@ -691,7 +618,7 @@ def _parse_args(argv: list[str]) -> dict:
             _die("--plain does not apply to the show command")
 
     return {
-        "mode": mode,
+        "mode": command,
         "query": " ".join(query_parts),
         "limit": limit if limit is not None else 10,
         "page": page if page is not None else 1,
@@ -714,15 +641,6 @@ def main() -> None:
         _cmd_occupations(output_json=args["json"], output_plain=args["plain"])
     elif mode == "show":
         _cmd_show(args["query"], output_json=args["json"])
-    elif mode == "ai":
-        # Progress indicator (TTY only, human output only).
-        if _stderr_is_tty() and not args["json"] and not args["plain"]:
-            print("Searching (AI)...\r", end="", file=sys.stderr, flush=True)
-        _cmd_ai_search(
-            args["query"],
-            output_json=args["json"],
-            output_plain=args["plain"],
-        )
     else:
         _cmd_search(
             args["query"],

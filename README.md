@@ -27,7 +27,6 @@ SKILLSMP_API_KEY=your-key-here
 ```
 skillsmp terraform
 skillsmp --limit 5 --sort recent react testing
-skillsmp --ai "how to optimize database queries"
 skillsmp show wshobson/terraform-module-library
 ```
 
@@ -38,11 +37,11 @@ skillsmp --json deployment
 skillsmp --plain react | grep facebook
 ```
 
-## Search modes
+## How search works
 
-The default keyword search matches your query against skill names and descriptions, sorted by stars. It's fast (~300ms) and supports pagination, but ranks by popularity rather than relevance.
+Search matches your query against skill names and descriptions, sorted by stars (or by `--sort recent`). It's fast (~300ms) and supports pagination, but ranks by popularity rather than relevance, so a specific query beats a vague one.
 
-`--ai` runs a vector similarity search powered by [Cloudflare Vectorize](https://developers.cloudflare.com/vectorize/). Each skill's full SKILL.md has been embedded, and your query is compared against those embeddings. This returns ~10 results ranked by relevance score, catching semantically related skills that keyword search misses. Pagination and sorting don't apply. Slower (~4-5s) because the query must be embedded first.
+SkillsMP used to offer an AI semantic search, and older versions of this tool exposed it as `--ai`. SkillsMP retired it in 2026, so `--ai` now exits with an error.
 
 ## Browsing the catalog
 
@@ -65,7 +64,6 @@ skillsmp show --json wshobson/terraform-module-library
 ## Flags
 
 ```
--a, --ai        AI semantic search
 -n, --limit N   Results per page (1-50, default: 10)
 -p, --page N    Page number (default: 1)
 -s, --sort KEY  Sort by: stars, recent (default: stars)
@@ -75,4 +73,4 @@ skillsmp show --json wshobson/terraform-module-library
     --version   Show version
 ```
 
-`--limit`, `--page`, and `--sort` apply to keyword search only.
+`--limit`, `--page`, and `--sort` apply to search only.

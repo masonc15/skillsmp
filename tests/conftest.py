@@ -75,16 +75,6 @@ def make_keyword_response(make_skill):
 
 
 @pytest.fixture
-def make_ai_response(make_skill):
-    def _make_ai_response(entries=None):
-        if entries is None:
-            entries = [{"skill": make_skill(), "score": 0.95}]
-        return {"data": {"data": entries}}
-
-    return _make_ai_response
-
-
-@pytest.fixture
 def mock_urlopen():
     def _mock_urlopen(response_data: dict):
         return mock.patch(
