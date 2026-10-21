@@ -43,9 +43,16 @@ Search matches your query against skill names and descriptions, sorted by stars 
 
 SkillsMP used to offer an AI semantic search, and older versions of this tool exposed it as `--ai`. SkillsMP retired it in 2026, so `--ai` now exits with an error.
 
-## Browsing the catalog
+## Filtering
 
-The `categories` and `occupations` commands list SkillsMP's taxonomy — skill categories grouped by domain, and the SOC occupation slugs the site organizes skills under. Neither needs an API key — categories come from the SkillsMP MCP server and occupations from the site's public sitemap:
+Search accepts `--category` and `--occupation` to narrow results by SkillsMP's taxonomy, and `--language` to keep only skills written in one language (an ISO code like `en`, `zh` or `ja`; `mul` means mixed and `und` undetermined):
+
+```
+skillsmp --category cicd deployment
+skillsmp --occupation lawyers --language en contracts
+```
+
+An unknown occupation or language is an error, but an unknown category just returns no results. To discover valid slugs, use the `categories` and `occupations` commands. Neither needs an API key — categories come from the SkillsMP MCP server and occupations from the site's public sitemap:
 
 ```
 skillsmp categories
@@ -64,13 +71,16 @@ skillsmp show --json wshobson/terraform-module-library
 ## Flags
 
 ```
--n, --limit N   Results per page (1-50, default: 10)
--p, --page N    Page number (default: 1)
--s, --sort KEY  Sort by: stars, recent (default: stars)
--j, --json      JSON output
-    --plain     Tab-separated, one line per result
--h, --help      Show help
-    --version   Show version
+-n, --limit N       Results per page (1-50, default: 10)
+-p, --page N        Page number (default: 1)
+-s, --sort KEY      Sort by: stars, recent (default: stars)
+    --category C    Filter by category slug
+    --occupation O  Filter by occupation slug
+    --language L    Filter by content language code
+-j, --json          JSON output
+    --plain         Tab-separated, one line per result
+-h, --help          Show help
+    --version       Show version
 ```
 
-`--limit`, `--page`, and `--sort` apply to search only.
+`--limit`, `--page`, `--sort`, and the filters apply to search only.

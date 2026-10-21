@@ -21,6 +21,7 @@ MCP_URL = "https://skillsmp.com/mcp"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 OCCUPATIONS_SITEMAP_URL = "https://skillsmp.com/sitemaps/occupations.xml"
 SUBCOMMANDS = ("categories", "occupations", "show")
+FILTER_FLAGS = ("--category", "--occupation", "--language")
 REQUEST_TIMEOUT = 30
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
@@ -88,23 +89,28 @@ def _full_help(color: bool) -> str:
 
 {bold("Commands:")}
   {lit("show")}            Full details for one skill, including its SKILL.md
-  {lit("categories")}      List skill categories by domain
-  {lit("occupations")}     List SOC occupation slugs
+  {lit("categories")}      List category slugs for --category
+  {lit("occupations")}     List occupation slugs for --occupation
 
 {bold("Flags:")}
-  {lit("-n, --limit")} {dim("N")}   Results per page (1-50, default: 10)
-  {lit("-p, --page")} {dim("N")}    Page number (default: 1)
-  {lit("-s, --sort")} {dim("KEY")}  Sort order: stars, recent (default: stars)
-  {lit("-j, --json")}      Machine-readable JSON output
-      {lit("--plain")}     One-line-per-result output for grep/awk
-  {lit("-h, --help")}      Show this help
-      {lit("--version")}   Show version
+  {lit("-n, --limit")} {dim("N")}       Results per page (1-50, default: 10)
+  {lit("-p, --page")} {dim("N")}        Page number (default: 1)
+  {lit("-s, --sort")} {dim("KEY")}      Sort order: stars, recent (default: stars)
+      {lit("--category")} {dim("C")}    Filter by category slug (see: skillsmp categories)
+      {lit("--occupation")} {dim("O")}  Filter by occupation slug (see: skillsmp occupations)
+      {lit("--language")} {dim("L")}    Filter by content language code (en, zh, ja, ...)
+  {lit("-j, --json")}          Machine-readable JSON output
+      {lit("--plain")}         One-line-per-result output for grep/awk
+  {lit("-h, --help")}          Show this help
+      {lit("--version")}       Show version
 
-  {dim("--limit, --page, and --sort apply to search only.")}
+  {dim("--limit, --page, --sort, and the filters apply to search only.")}
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
   {lit("skillsmp --limit 5 --sort recent react testing")}
+  {lit("skillsmp --category cicd --json deployment")}
+  {lit("skillsmp --occupation lawyers --language en contracts")}
   {lit("skillsmp show wshobson/terraform-module-library")}
   {lit("skillsmp --plain react | grep facebook")}
 
@@ -343,10 +349,21 @@ def _cmd_search(
     limit: int = 10,
     page: int = 1,
     sort: str = "stars",
+    category: str | None = None,
+    occupation: str | None = None,
+    language: str | None = None,
     output_json: bool = False,
     output_plain: bool = False,
 ) -> None:
-    params = {"q": query, "limit": limit, "page": page, "sortBy": sort}
+    params = {
+        "q": query,
+        "limit": limit,
+        "page": page,
+        "sortBy": sort,
+        "category": category,
+        "occupation": occupation,
+        "language": language,
+    }
     result = _api_request("search", params, use_json_errors=output_json)
     data = result.get("data", {})
     skills = data.get("skills", [])
@@ -416,6 +433,7 @@ def _cmd_categories(*, output_json: bool = False, output_plain: bool = False) ->
             count = _format_stars(cat.get("count"))
             print(f"  {cat.get('slug', ''):<32} {count:>7} skills")
         print()
+    print("Filter searches with: skillsmp --category <slug> <query>")
 
 
 def _cmd_occupations(*, output_json: bool = False, output_plain: bool = False) -> None:
@@ -438,7 +456,10 @@ def _cmd_occupations(*, output_json: bool = False, output_plain: bool = False) -
         return
 
     if not output_plain:
-        print(f"{len(slugs)} occupations\n")
+        print(
+            f"{len(slugs)} occupations "
+            "(filter searches with: skillsmp --occupation <slug> <query>)\n"
+        )
     for slug in slugs:
         print(slug)
 
@@ -543,6 +564,7 @@ def _parse_args(argv: list[str]) -> dict:
     limit: int | None = None
     page: int | None = None
     sort: str | None = None
+    filters: dict[str, str] = {}
     output_json = False
     output_plain = False
     query_parts: list[str] = []
@@ -574,6 +596,8 @@ def _parse_args(argv: list[str]) -> dict:
         elif arg in ("-p", "--page"):
             raw, i = _take_value(argv, i, arg)
             page = _parse_int_flag("--page", raw)
+        elif arg in FILTER_FLAGS:
+            filters[arg[2:]], i = _take_value(argv, i, arg)
         elif arg == "--":
             i += 1
             query_parts.extend(argv[i:])
@@ -603,8 +627,11 @@ def _parse_args(argv: list[str]) -> dict:
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
 
-    if command != "search" and any(x is not None for x in (limit, page, sort)):
-        _die(f"--limit, --page, --sort do not apply to the {command} command")
+    if command != "search" and (filters or any(x is not None for x in (limit, page, sort))):
+        _die(
+            "--limit, --page, --sort, --category, --occupation, --language "
+            f"do not apply to the {command} command"
+        )
 
     if command in ("categories", "occupations") and query_parts:
         _die(f"the {command} command takes no arguments")
@@ -623,6 +650,9 @@ def _parse_args(argv: list[str]) -> dict:
         "limit": limit if limit is not None else 10,
         "page": page if page is not None else 1,
         "sort": sort if sort is not None else "stars",
+        "category": filters.get("category"),
+        "occupation": filters.get("occupation"),
+        "language": filters.get("language"),
         "json": output_json,
         "plain": output_plain,
     }
@@ -647,6 +677,9 @@ def main() -> None:
             limit=args["limit"],
             page=args["page"],
             sort=args["sort"],
+            category=args["category"],
+            occupation=args["occupation"],
+            language=args["language"],
             output_json=args["json"],
             output_plain=args["plain"],
         )

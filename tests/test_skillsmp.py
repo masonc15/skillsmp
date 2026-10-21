@@ -37,6 +37,9 @@ class TestArgumentParsing:
             (["-p", "3", "q"], {"page": 3}),
             (["--sort", "recent", "q"], {"sort": "recent"}),
             (["-s", "stars", "q"], {"sort": "stars"}),
+            (["--category", "devops", "q"], {"category": "devops"}),
+            (["--occupation", "lawyers", "q"], {"occupation": "lawyers"}),
+            (["--language", "zh", "q"], {"language": "zh"}),
         ],
     )
     def test_supported_flags_and_modes(self, argv, expected):
@@ -51,6 +54,9 @@ class TestArgumentParsing:
         assert parsed["sort"] == "stars"
         assert parsed["json"] is False
         assert parsed["plain"] is False
+        assert parsed["category"] is None
+        assert parsed["occupation"] is None
+        assert parsed["language"] is None
 
     def test_flags_stop_after_first_positional(self):
         parsed = parse_args(["hello", "--ai", "--json"])
@@ -128,6 +134,11 @@ class TestSubcommandParsing:
             ["categories", "--ai"],
             ["show", "acme/deploy", "--limit", "5"],
             ["categories", "--sort", "recent"],
+            ["show", "acme/x", "--category", "devops"],
+            ["occupations", "--language", "en"],
+            ["--category"],
+            ["--occupation"],
+            ["--language"],
         ],
     )
     def test_subcommand_usage_errors_exit_2(self, argv):
@@ -480,6 +491,7 @@ class TestCategoriesCommand:
         assert "DevOps" in out
         assert "ci-cd" in out
         assert "106.0k skills" in out
+        assert "--category <slug>" in out
         request = patched.call_args.args[0]
         assert request.full_url == skillsmp.MCP_URL
         assert request.get_header("Mcp-protocol-version") == skillsmp.MCP_PROTOCOL_VERSION
@@ -653,6 +665,34 @@ class TestShowCommand:
         captured = capsys.readouterr()
         assert "acme/terraform-deploy" in captured.out
         assert "could not fetch SKILL.md" in captured.err
+
+
+class TestSearchFilters:
+    def test_filters_sent_as_params(self, mock_urlopen):
+        with mock_urlopen({"data": {}}) as patched:
+            skillsmp._cmd_search(
+                "q", category="devops", occupation="lawyers", language="zh"
+            )
+        url = patched.call_args.args[0].full_url
+        assert "category=devops" in url
+        assert "occupation=lawyers" in url
+        assert "language=zh" in url
+
+    def test_filters_omitted_when_none(self, mock_urlopen):
+        with mock_urlopen({"data": {}}) as patched:
+            skillsmp._cmd_search("q")
+        url = patched.call_args.args[0].full_url
+        assert "category" not in url
+        assert "occupation" not in url
+        assert "language" not in url
+
+    def test_main_passes_filters_through(self, mock_urlopen, make_keyword_response):
+        argv = ["skillsmp", "--category", "devops", "--language", "en", "deploy"]
+        with mock_urlopen(make_keyword_response()) as patched, mock.patch("sys.argv", argv):
+            skillsmp.main()
+        url = patched.call_args.args[0].full_url
+        assert "category=devops" in url
+        assert "language=en" in url
 
 
 class TestSubcommandIntegration:
