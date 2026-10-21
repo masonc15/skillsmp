@@ -246,6 +246,40 @@ class TestKeywordOutput:
         assert parts[0] == "acme/terraform-deploy"
         assert parts[1] == "42"
 
+    def test_non_english_skills_are_tagged(
+        self, capsys, mock_urlopen, make_keyword_response, make_skill
+    ):
+        skills = [
+            make_skill(name="one", contentLanguage="en"),
+            make_skill(name="two", contentLanguage="es"),
+            make_skill(name="three", contentLanguage=None),
+        ]
+        with mock_urlopen(make_keyword_response(skills=skills, total=3)):
+            skillsmp._cmd_search("terraform")
+        out = capsys.readouterr().out
+        assert "acme/one  [" in out
+        assert "acme/two (es)  [" in out
+        assert "acme/three  [" in out
+
+    def test_plain_output_ends_with_language(
+        self, capsys, mock_urlopen, make_keyword_response, make_skill
+    ):
+        skills = [make_skill(contentLanguage="zh"), make_skill(name="x")]
+        with mock_urlopen(make_keyword_response(skills=skills, total=2)):
+            skillsmp._cmd_search("terraform", output_plain=True)
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].split("\t")[-1] == "zh"
+        assert lines[1].split("\t")[-1] == ""
+        assert len(lines[1].split("\t")) == 5
+
+    def test_json_output_includes_language(
+        self, capsys, mock_urlopen, make_keyword_response, make_skill
+    ):
+        with mock_urlopen(make_keyword_response(skills=[make_skill(contentLanguage="ja")])):
+            skillsmp._cmd_search("terraform", output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert data["skills"][0]["contentLanguage"] == "ja"
+
     def test_plain_output_with_multiple_results_prints_one_line_each(
         self, capsys, mock_urlopen, make_keyword_response, make_skill
     ):

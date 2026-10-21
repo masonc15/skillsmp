@@ -306,13 +306,23 @@ def _normalize_skill(skill: dict) -> dict:
         "updatedAt": skill.get("updatedAt"),
         "githubUrl": skill.get("githubUrl", ""),
         "skillUrl": skill.get("skillUrl", ""),
+        "contentLanguage": skill.get("contentLanguage"),
     }
+
+
+def _skill_label(d: dict) -> str:
+    """author/name, tagged with the content language unless it's English."""
+    label = f"{d['author']}/{d['name']}"
+    lang = d["contentLanguage"]
+    if lang and lang != "en":
+        label += f" ({lang})"
+    return label
 
 
 def _print_skill(skill: dict) -> None:
     d = _normalize_skill(skill)
 
-    header = f"  {d['author']}/{d['name']}"
+    header = f"  {_skill_label(d)}"
     header += f"  [{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}]"
     print(header)
     if d["description"]:
@@ -331,6 +341,7 @@ def _print_skill_plain(skill: dict) -> None:
         str(d["stars"]),
         d["description"][:DESC_PLAIN_LIMIT],
         d["githubUrl"],
+        d["contentLanguage"] or "",
     ]
     print("\t".join(parts))
 
@@ -528,7 +539,7 @@ def _cmd_show(spec: str, *, output_json: bool = False) -> None:
 
     stars = _format_stars(d["stars"])
     updated = _format_timestamp(d["updatedAt"])
-    print(f"{d['author']}/{d['name']}  [{stars} stars, updated {updated}]\n")
+    print(f"{_skill_label(d)}  [{stars} stars, updated {updated}]\n")
     if d["description"]:
         print(f"{d['description']}\n")
     if d["githubUrl"]:

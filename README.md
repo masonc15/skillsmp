@@ -30,7 +30,7 @@ skillsmp --limit 5 --sort recent react testing
 skillsmp show wshobson/terraform-module-library
 ```
 
-Use `--json` for structured output or `--plain` for tab-separated lines that pipe to `grep` and `awk`:
+Results often include translations of the same skill, so anything not in English is tagged with its language code, like `affaan-m/python-patterns (es)`. Use `--json` for structured output or `--plain` for tab-separated lines (name, stars, description, GitHub URL, language) that pipe to `grep` and `awk`:
 
 ```
 skillsmp --json deployment
