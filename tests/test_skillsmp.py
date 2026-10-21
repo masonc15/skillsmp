@@ -716,11 +716,38 @@ class TestShowCommand:
         with mock.patch(
             "skillsmp.urllib.request.urlopen",
             return_value=make_response(make_keyword_response(skills=[], total=0)),
-        ):
+        ) as patched:
             with pytest.raises(SystemExit) as exc:
                 skillsmp._cmd_show("acme/nonexistent")
         assert_exit_code(exc, 1)
         assert "skill not found: acme/nonexistent" in capsys.readouterr().err
+        assert patched.call_count == 2
+
+    def test_searches_by_author_and_name_first(self, make_skill, make_keyword_response):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=responses
+        ) as patched:
+            skillsmp._cmd_show("acme/terraform-deploy")
+        assert "q=acme+terraform-deploy" in patched.call_args_list[0].args[0].full_url
+
+    def test_falls_back_to_name_only_search(
+        self, capsys, make_skill, make_keyword_response
+    ):
+        responses = [
+            make_response(make_keyword_response(skills=[make_skill(author="other")])),
+            make_response(make_keyword_response(skills=[make_skill()])),
+            make_raw_response(b"content"),
+        ]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", side_effect=responses
+        ) as patched:
+            skillsmp._cmd_show("acme/terraform-deploy")
+        assert "q=terraform-deploy&" in patched.call_args_list[1].args[0].full_url
+        assert "acme/terraform-deploy" in capsys.readouterr().out
 
     def test_skill_md_fetch_failure_still_shows_details(
         self, capsys, make_skill, make_keyword_response

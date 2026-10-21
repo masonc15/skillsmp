@@ -508,16 +508,29 @@ def _fetch_skill_md(github_url: str) -> str | None:
     return None
 
 
+def _find_skill(author: str, name: str, *, use_json_errors: bool = False) -> list[dict]:
+    """Search for skills named exactly author/name, most-starred first."""
+    # Searching by name alone ranks by stars, so a low-star copy of a common
+    # name (say, code-review) falls past the first page. Including the author
+    # in the query finds it; the name-only query is a fallback.
+    for query in (f"{author} {name}", name):
+        result = _api_request(
+            "search", {"q": query, "limit": MAX_LIMIT}, use_json_errors=use_json_errors
+        )
+        matches = [
+            s
+            for s in result.get("data", {}).get("skills", [])
+            if s.get("author", "").lower() == author.lower()
+            and s.get("name", "").lower() == name.lower()
+        ]
+        if matches:
+            return matches
+    return []
+
+
 def _cmd_show(spec: str, *, output_json: bool = False) -> None:
     author, _, name = spec.partition("/")
-    result = _api_request("search", {"q": name, "limit": MAX_LIMIT}, use_json_errors=output_json)
-    skills = result.get("data", {}).get("skills", [])
-    matches = [
-        s
-        for s in skills
-        if s.get("author", "").lower() == author.lower()
-        and s.get("name", "").lower() == name.lower()
-    ]
+    matches = _find_skill(author, name, use_json_errors=output_json)
 
     if not matches:
         if output_json:
