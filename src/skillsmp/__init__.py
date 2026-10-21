@@ -338,6 +338,18 @@ def _print_skill_plain(skill: dict) -> None:
 # --- commands ---
 
 
+def _describe_pagination(pagination: dict) -> str:
+    total = pagination.get("total", 0)
+    pg = pagination.get("page", 1)
+    if pagination.get("totalIsExact", True):
+        return f"{total} results (page {pg}/{pagination.get('totalPages', 1)})"
+    # The API only counts a little past the current page, so its total and
+    # totalPages are lower bounds. Report what's known instead.
+    if pagination.get("hasNext"):
+        return f"page {pg}, more results on page {pg + 1}"
+    return f"page {pg}, last page"
+
+
 def _cmd_search(
     query: str,
     *,
@@ -370,8 +382,10 @@ def _cmd_search(
                 "query": query,
                 "mode": "keyword",
                 "total": pagination.get("total", 0),
+                "totalIsExact": pagination.get("totalIsExact", True),
                 "page": pagination.get("page", 1),
                 "totalPages": pagination.get("totalPages", 1),
+                "hasNext": pagination.get("hasNext", False),
                 "skills": [_normalize_skill(s) for s in skills],
             },
             sys.stdout,
@@ -385,11 +399,7 @@ def _cmd_search(
             _print_skill_plain(s)
         return
 
-    total = pagination.get("total", 0)
-    pg = pagination.get("page", 1)
-    total_pages = pagination.get("totalPages", 1)
-
-    print(f'Keyword search: "{query}" — {total} results (page {pg}/{total_pages})\n')
+    print(f'Keyword search: "{query}" — {_describe_pagination(pagination)}\n')
     if not skills:
         print("  No results found.")
         if _stderr_is_tty():

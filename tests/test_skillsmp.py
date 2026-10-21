@@ -257,6 +257,37 @@ class TestKeywordOutput:
         assert lines[0].startswith("acme/one\t")
         assert lines[1].startswith("acme/two\t")
 
+    def test_exact_total_reported(self, capsys, mock_urlopen, make_keyword_response):
+        with mock_urlopen(make_keyword_response(total=12, page=1, total_pages=2)):
+            skillsmp._cmd_search("terraform")
+        assert "12 results (page 1/2)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("has_next", "needle"),
+        [(True, "page 2, more results on page 3"), (False, "page 2, last page")],
+    )
+    def test_estimated_total_not_reported_as_count(
+        self, capsys, mock_urlopen, make_keyword_response, has_next, needle
+    ):
+        response = make_keyword_response(total=21, page=2, total_pages=3)
+        response["data"]["pagination"].update(totalIsExact=False, hasNext=has_next)
+        with mock_urlopen(response):
+            skillsmp._cmd_search("terraform")
+        out = capsys.readouterr().out
+        assert needle in out
+        assert "21 results" not in out
+
+    def test_json_output_includes_pagination_flags(
+        self, capsys, mock_urlopen, make_keyword_response
+    ):
+        response = make_keyword_response(total=4, total_pages=2)
+        response["data"]["pagination"].update(totalIsExact=False, hasNext=True)
+        with mock_urlopen(response):
+            skillsmp._cmd_search("terraform", output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert data["totalIsExact"] is False
+        assert data["hasNext"] is True
+
     def test_no_results_human(self, capsys, mock_urlopen, make_keyword_response):
         with mock_urlopen(make_keyword_response(skills=[], total=0)):
             skillsmp._cmd_search("none")
