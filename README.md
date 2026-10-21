@@ -16,7 +16,7 @@ Or run without installing:
 uvx skillsmp terraform
 ```
 
-Set your API key in `~/.env` or export it directly:
+It works without an API key, but anonymous use is capped at 50 searches a day and 10 a minute. A free key from [skillsmp.com/developers](https://skillsmp.com/developers) raises that to 500 a day and 30 a minute. Set it in `~/.env` or export it directly:
 
 ```
 SKILLSMP_API_KEY=your-key-here

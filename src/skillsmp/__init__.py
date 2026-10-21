@@ -115,7 +115,7 @@ def _full_help(color: bool) -> str:
   {lit("skillsmp --plain react | grep facebook")}
 
 {bold("Environment:")}
-  {lit("SKILLSMP_API_KEY")}    API key (required). Read from env or ~/.env.
+  {lit("SKILLSMP_API_KEY")}    API key (optional, raises rate limits). Read from env or ~/.env.
 
 Docs: https://github.com/masonc15/skillsmp
 """
@@ -150,11 +150,8 @@ def _read_dotenv_key(name: str) -> str | None:
     return None
 
 
-def _get_api_key() -> str:
-    key = os.environ.get("SKILLSMP_API_KEY") or _read_dotenv_key("SKILLSMP_API_KEY")
-    if not key:
-        _die("SKILLSMP_API_KEY not set. Export it or add to ~/.env.")
-    return key
+def _get_api_key() -> str | None:
+    return os.environ.get("SKILLSMP_API_KEY") or _read_dotenv_key("SKILLSMP_API_KEY")
 
 
 # --- API client ---
@@ -222,15 +219,13 @@ def _fetch_with_retry(
 def _api_request(
     endpoint: str, params: dict, *, use_json_errors: bool = False
 ) -> dict:
-    api_key = _get_api_key()
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-    req = urllib.request.Request(
-        f"{BASE_URL}/{endpoint}?{qs}",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": f"skillsmp-cli/{__version__}",
-        },
-    )
+    headers = {"User-Agent": f"skillsmp-cli/{__version__}"}
+    # Anonymous requests work too, but with much lower rate limits.
+    api_key = _get_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(f"{BASE_URL}/{endpoint}?{qs}", headers=headers)
     return json.loads(_fetch_with_retry(req, use_json_errors=use_json_errors))
 
 

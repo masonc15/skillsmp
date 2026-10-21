@@ -418,12 +418,17 @@ class TestEnvironmentAndConfig:
         assert skillsmp._get_api_key() == "ok"
         assert "OTHER_VAR" not in skillsmp.os.environ
 
-    def test_missing_api_key_exits_2(self, monkeypatch, tmp_path):
+    def test_missing_api_key_returns_none(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SKILLSMP_API_KEY", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
-        with pytest.raises(SystemExit) as exc:
-            skillsmp._get_api_key()
-        assert_exit_code(exc, 2)
+        assert skillsmp._get_api_key() is None
+
+    def test_request_without_api_key_is_anonymous(self, monkeypatch, tmp_path, mock_urlopen):
+        monkeypatch.delenv("SKILLSMP_API_KEY", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        with mock_urlopen({"data": {}}) as patched:
+            skillsmp._api_request("search", {"q": "x"})
+        assert patched.call_args.args[0].get_header("Authorization") is None
 
 
 class TestMainIntegration:
