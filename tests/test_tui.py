@@ -484,6 +484,33 @@ class TestCommitDates:
 
         run_app(Search("deploy"), script)
 
+    def test_sort_by_updated(self, both, monkeypatch):
+        monkeypatch.setattr(skillsmp, "_github_token", lambda: "t")
+
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await pilot.press("s", "s")
+            await until(pilot, lambda: app.search.sort == "updated" and app.loading_search is None)
+            # Fake dates are 2026-0{1 + n % 9}-15, so skill-8, -17, -26... lead.
+            assert names(app)[:3] == ["skill-8", "skill-17", "skill-26"]
+            assert both.github.count("/graphql") == 9  # all 45, five a query
+            graphql = both.github.count("/graphql")
+            await pilot.press("right")
+            await until(pilot, lambda: app.search.page == 2)
+            assert app.loading_search is None  # served from the cache
+            assert both.github.count("/graphql") == graphql
+
+        run_app(Search("deploy"), script)
+
+    def test_sort_by_updated_without_token(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await pilot.press("s", "s")
+            await until(pilot, lambda: app.status.has_class("error"))
+            assert "needs a GitHub token" in str(app.status.render())
+
+        run_app(Search("deploy"), script)
+
     def test_deleted_repo_marked_gone(self, monkeypatch):
         monkeypatch.setattr(skillsmp, "_github_token", lambda: "t")
         fake = FakeBoth(hits=[{"id": "gone/repo/x", "source": "gone/repo", "skillId": "x", "installs": 3}])

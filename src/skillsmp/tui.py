@@ -172,7 +172,7 @@ class Client:
             raise _NotCached
         return data
 
-    def _run(self, search: Search, fetch):
+    def _run(self, search: Search, fetch, commit_dates):
         # SkillsMP is read 50 at a time and skills.sh 200 at once; display
         # pages are cut from that, and exclusions just re-filter it.
         needed = -(-search.page * search.limit // core.MAX_LIMIT)
@@ -185,6 +185,7 @@ class Client:
             stream=True,
             max_api_pages=needed + core.EXCLUDE_MAX_REQUESTS,
             source=search.source,
+            commit_dates=commit_dates,
         )
 
     @staticmethod
@@ -203,7 +204,7 @@ class Client:
         core.FetchError.
         """
         try:
-            result = self._run(search, self._request_json)
+            result = self._run(search, self._request_json, self._sort_dates)
         except core.FetchError:
             if not self._falls_back(search, None):
                 raise
@@ -211,19 +212,19 @@ class Client:
         if not self._falls_back(search, result):
             return search, result
         fallback = search.on_skillsmp()
-        return fallback, self._run(fallback, self._request_json)
+        return fallback, self._run(fallback, self._request_json, self._sort_dates)
 
     def search_cached(self, search: Search):
         """Like search(), if everything it needs is cached; else None."""
         try:
-            result = self._run(search, self._cached_json)
+            result = self._run(search, self._cached_json, self._cached_dates)
         except _NotCached:
             return None
         if not self._falls_back(search, result):
             return search, result
         fallback = search.on_skillsmp()
         try:
-            return fallback, self._run(fallback, self._cached_json)
+            return fallback, self._run(fallback, self._cached_json, self._cached_dates)
         except _NotCached:
             return None
 
@@ -252,6 +253,16 @@ class Client:
                 self.dates.update(found)
         with self._lock:
             return {d["id"]: self.dates.get(d["id"]) for d in skills}
+
+    def _sort_dates(self, skills: list[dict]) -> dict[str, dict]:
+        core._require_token_to_sort()
+        return self.commit_dates(skills)
+
+    def _cached_dates(self, skills: list[dict]) -> dict[str, dict]:
+        with self._lock:
+            if any(d["id"] not in self.dates for d in skills):
+                raise _NotCached
+            return {d["id"]: self.dates[d["id"]] for d in skills}
 
     def skill_md_cached(self, d: dict) -> tuple[bool, str | None]:
         with self._lock:
@@ -534,7 +545,10 @@ class SkillsmpApp(App):
             return
         self.loading_search = search
         self.results.add_class("stale")
-        self.set_status(f"Searching “{search.query}”…")
+        if search.sort == "updated" and search.source == "skills.sh":
+            self.set_status(f"Searching “{search.query}” and asking GitHub when each result last changed…")
+        else:
+            self.set_status(f"Searching “{search.query}”…")
         self.refresh_bindings()
         self.fetch(search)
 
