@@ -325,6 +325,12 @@ def _skill_label(d: dict) -> str:
     return label
 
 
+def _clip(text: str, limit: int) -> str:
+    """Collapse whitespace (descriptions can span lines) and cut to `limit`."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def _print_skill(skill: dict) -> None:
     d = _normalize_skill(skill)
 
@@ -332,7 +338,7 @@ def _print_skill(skill: dict) -> None:
     header += f"  [{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}]"
     print(header)
     if d["description"]:
-        print(f"    {d['description'][:DESC_DISPLAY_LIMIT]}")
+        print(f"    {_clip(d['description'], DESC_DISPLAY_LIMIT)}")
     if d["githubUrl"]:
         print(f"    github: {d['githubUrl']}")
     if d["skillUrl"]:
@@ -345,7 +351,7 @@ def _print_skill_plain(skill: dict) -> None:
     parts = [
         f"{d['author']}/{d['name']}",
         str(d["stars"]),
-        d["description"][:DESC_PLAIN_LIMIT],
+        _clip(d["description"], DESC_PLAIN_LIMIT),
         d["githubUrl"],
         d["contentLanguage"] or "",
     ]

@@ -435,12 +435,23 @@ class TestFormattingHelpers:
     def test_description_truncation(self, capsys, make_skill):
         skillsmp._print_skill(make_skill(description="x" * 300))
         out = capsys.readouterr().out
-        assert "x" * skillsmp.DESC_DISPLAY_LIMIT in out
-        assert "x" * (skillsmp.DESC_DISPLAY_LIMIT + 1) not in out
+        assert "x" * (skillsmp.DESC_DISPLAY_LIMIT - 1) + "…" in out
+        assert "x" * skillsmp.DESC_DISPLAY_LIMIT not in out
 
         skillsmp._print_skill_plain(make_skill(description="y" * 200))
         plain = capsys.readouterr().out.strip().split("\t")
         assert len(plain[2]) == skillsmp.DESC_PLAIN_LIMIT
+        assert plain[2].endswith("…")
+
+    def test_multiline_description_stays_on_one_line(self, capsys, make_skill):
+        skill = make_skill(description="first line\n\nsecond\tline\n")
+        skillsmp._print_skill(skill)
+        assert "    first line second line\n" in capsys.readouterr().out
+
+        skillsmp._print_skill_plain(skill)
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 1
+        assert lines[0].split("\t")[2] == "first line second line"
 
 
 class TestEnvironmentAndConfig:
