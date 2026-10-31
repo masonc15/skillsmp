@@ -271,9 +271,9 @@ class TestKeywordOutput:
         with mock_urlopen(make_keyword_response(skills=skills, total=2)):
             skillsmp._cmd_search("terraform", output_plain=True)
         lines = capsys.readouterr().out.splitlines()
-        assert lines[0].split("\t")[-2:] == ["zh", "skillsmp"]
-        assert lines[1].split("\t")[-2:] == ["", "skillsmp"]
-        assert len(lines[1].split("\t")) == 6
+        assert lines[0].split("\t")[-3:] == ["zh", "skillsmp", "2023-11-14"]
+        assert lines[1].split("\t")[-3:] == ["", "skillsmp", "2023-11-14"]
+        assert len(lines[1].split("\t")) == 7
 
     def test_json_output_includes_language(
         self, capsys, mock_urlopen, make_keyword_response, make_skill

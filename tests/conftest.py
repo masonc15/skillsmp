@@ -31,10 +31,18 @@ def make_http_error(code: int, reason: str = "Error", body: bytes = b"") -> urll
 
 
 @pytest.fixture(autouse=True)
-def isolate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate process env per test and provide a default API key."""
+def isolate_environment(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Isolate process env per test and provide a default API key.
+
+    There's no GitHub token unless a test sets one, and the skill-path
+    cache starts empty in a temporary directory.
+    """
     monkeypatch.setattr(skillsmp.os, "environ", dict(os.environ))
     monkeypatch.setenv("SKILLSMP_API_KEY", FAKE_API_KEY)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(skillsmp, "_github_token", lambda: None)
+    monkeypatch.setattr(skillsmp, "_skill_paths", skillsmp._SkillPathCache())
+    monkeypatch.setattr(skillsmp, "_repo_trees", {})
 
 
 @pytest.fixture

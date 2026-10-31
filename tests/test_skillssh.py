@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import urllib.error
 import urllib.parse
 from unittest import mock
@@ -25,6 +26,25 @@ HITS = [
 
 SKILL_MD = "---\nname: terraform-test\ndescription: >\n  Write and run\n  Terraform tests.\n---\n# Terraform tests\n"
 
+TREES = {
+    "hashicorp/agent-skills": [
+        {"path": "terraform/skills/terraform-style-guide/SKILL.md", "sha": "aaa"},
+        {"path": "terraform/skills/terraform-test/SKILL.md", "sha": "bbb"},
+        {"path": "terraform/skills/terraform-test/notes.md", "sha": "ccc"},
+    ],
+    # Renamed since skills.sh indexed it: only the contents still match.
+    "acme/infra": [
+        {"path": "skills/native/SKILL.md", "sha": skillsmp._git_blob_sha(SKILL_MD)},
+        {"path": "skills/other/SKILL.md", "sha": "ddd"},
+    ],
+}
+
+COMMITS = {
+    ("hashicorp/agent-skills", "terraform/skills/terraform-style-guide"): "2026-08-10T15:37:46Z",
+    ("hashicorp/agent-skills", "terraform/skills/terraform-test"): "2026-07-01T00:00:00Z",
+    ("acme/infra", "skills/native"): "2025-01-02T03:04:05Z",
+}
+
 SKILLSMP_SKILL = {
     "name": "terraform-deploy",
     "author": "acme",
@@ -47,10 +67,11 @@ def response(body) -> mock.MagicMock:
 class Router:
     """Fake urlopen that answers by host and path."""
 
-    def __init__(self, hits=HITS, skillssh_error: int | None = None, download=True):
+    def __init__(self, hits=HITS, skillssh_error: int | None = None, download=True, github_error=None):
         self.hits = hits
         self.skillssh_error = skillssh_error
         self.download = download
+        self.github_error = github_error
         self.urls: list[str] = []
 
     def __call__(self, req, timeout=None):
@@ -77,9 +98,33 @@ class Router:
             if parts.path == "/.well-known/skills/stripe-docs/SKILL.md":
                 return response(b"---\ndescription: >-\n  Stripe docs.\n---\n# Stripe\n")
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+        if parts.netloc == "api.github.com":
+            return self.github(req, parts)
         if parts.netloc == "raw.githubusercontent.com":
             return response(b"# from github\n")
         raise AssertionError(f"unexpected URL {url}")
+
+    def github(self, req, parts):
+        assert req.headers["Authorization"] == "Bearer gh-token"
+        if self.github_error:
+            raise urllib.error.HTTPError(req.full_url, self.github_error, "err", {}, io.BytesIO(b"{}"))
+        tree_path = re.fullmatch(r"/repos/(.+)/git/trees/HEAD", parts.path)
+        if tree_path:
+            repo = tree_path.group(1)
+            if repo not in TREES:
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b"{}"))
+            return response({"tree": [{"type": "blob", **e} for e in TREES[repo]], "truncated": False})
+        assert parts.path == "/graphql"
+        query = json.loads(req.data)["query"]
+        data = {}
+        for alias, owner, name, path in re.findall(
+            r'(r\d+): repository\(owner: "(.*?)", name: "(.*?)"\) .*?history\(first: 1(?:, path: "(.*?)")?\)',
+            query,
+        ):
+            date = COMMITS.get((f"{owner}/{name}", path))
+            nodes = [{"committedDate": date}] if date else []
+            data[alias] = {"defaultBranchRef": {"target": {"history": {"nodes": nodes}}}}
+        return response({"data": data})
 
     def hosts(self) -> list[str]:
         return [urllib.parse.urlsplit(u).netloc for u in self.urls]
@@ -128,7 +173,7 @@ class TestSearch:
         search(sort="installs", output_plain=True)
         lines = capsys.readouterr().out.splitlines()
         assert [line.split("\t")[1] for line in lines] == ["50000", "20486", "12774", "8890"]
-        assert all(line.endswith("\tskills.sh") for line in lines)
+        assert all(line.split("\t")[5:] == ["skills.sh", ""] for line in lines)
 
     def test_exclude_matches_repo_path(self, router, capsys):
         search(exclude=["hashicorp/"], output_json=True)
@@ -287,3 +332,109 @@ class TestHelpers:
         assert d["installCommand"] == "npx skills add https://github.com/acme/terraform-deploy"
         assert d["id"] == "acme/terraform-deploy"
         assert d["registry"] == "skillsmp"
+
+
+@pytest.fixture
+def token(monkeypatch):
+    monkeypatch.setattr(skillsmp, "_github_token", lambda: "gh-token")
+
+
+def github_urls(router) -> list[str]:
+    return [u.removeprefix("https://api.github.com") for u in router.urls if "api.github.com" in u]
+
+
+class TestCommitDates:
+    def test_search_shows_last_commit_of_skill_folder(self, router, token, capsys):
+        search(output_json=True)
+        dates = {s["id"]: s["updatedAt"] for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert dates == {
+            "hashicorp/agent-skills/terraform-style-guide": "2026-08-10T15:37:46Z",
+            "hashicorp/agent-skills/terraform-test": "2026-07-01T00:00:00Z",
+            "acme/infra/terraform-native": "2025-01-02T03:04:05Z",
+            "docs.stripe.com/stripe-docs": None,  # not on GitHub
+        }
+
+    def test_human_and_plain_output(self, router, token, capsys):
+        search()
+        assert "terraform-test  [8.9k installs, updated 2026-07-01]" in capsys.readouterr().out
+        search(output_plain=True)
+        line = capsys.readouterr().out.splitlines()[0]
+        assert line.split("\t")[-1] == "2026-08-10"
+
+    def test_folders_cached_between_runs(self, router, token, capsys):
+        search()
+        first = github_urls(router)
+        assert sorted(u for u in first if "/trees/" in u) == [
+            "/repos/acme/infra/git/trees/HEAD?recursive=1",
+            "/repos/hashicorp/agent-skills/git/trees/HEAD?recursive=1",
+        ]
+        skillsmp._skill_paths.entries = None  # as if it were a new process
+        router.urls.clear()
+        search()
+        assert github_urls(router) == ["/graphql"]
+
+    def test_lookups_split_into_small_queries(self, token, capsys, monkeypatch):
+        monkeypatch.setattr(skillsmp, "GRAPHQL_BATCH", 2)
+        r = Router()
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=r):
+            search(output_json=True)
+        assert github_urls(r).count("/graphql") == 2  # 3 folders
+        assert json.loads(capsys.readouterr().out)["skills"][2]["updatedAt"] == "2025-01-02T03:04:05Z"
+
+    def test_deleted_repo_remembered_as_unknown(self, token, capsys):
+        r = Router(hits=[hit("gone/repo/thing", 5)])
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=r):
+            search()
+            search()
+        assert github_urls(r) == ["/repos/gone/repo/git/trees/HEAD?recursive=1"]
+        assert "[5 installs, GitHub repo deleted]" in capsys.readouterr().out
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=r):
+            search(output_json=True)
+        skill = json.loads(capsys.readouterr().out)["skills"][0]
+        assert (skill["updatedAt"], skill["repoMissing"]) == (None, True)
+
+    def test_github_failure_still_prints_results(self, token, capsys):
+        r = Router(github_error=500)
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=r), mock.patch(
+            "skillsmp.time.sleep"
+        ):
+            search()
+        captured = capsys.readouterr()
+        assert "terraform-test  [8.9k installs]" in captured.out
+        assert "skills.sh search" in captured.out
+
+    def test_no_token_warns_without_calling_github(self, router, capsys):
+        search()
+        assert "last-commit dates need a GitHub token" in capsys.readouterr().err
+        assert github_urls(router) == []
+
+    def test_show_includes_date(self, router, token, capsys):
+        skillsmp._cmd_show("hashicorp/agent-skills/terraform-test", source="skills.sh", output_json=True)
+        assert json.loads(capsys.readouterr().out)["updatedAt"] == "2026-07-01T00:00:00Z"
+
+
+class TestPickSkillDir:
+    DIRS = {"a/deploy": "s1", "b/deploy": "s1", "deploy": "s2", "x/y/other": "s3"}
+
+    def test_contents_beat_names(self):
+        md = "same"
+        dirs = {"skills/renamed": skillsmp._git_blob_sha(md), "skills/deploy": "zzz"}
+        assert skillsmp._pick_skill_dir(dirs, "deploy", md) == "skills/renamed"
+
+    def test_shallowest_name_match(self):
+        assert skillsmp._pick_skill_dir(self.DIRS, "Deploy", None) == "deploy"
+
+    def test_only_skill_in_repo(self):
+        assert skillsmp._pick_skill_dir({"": "s"}, "whatever", None) == ""
+
+    def test_root_is_named_after_repo(self):
+        dirs = {"": "s1", "subskills/a": "s2", "subskills/b": "s3"}
+        assert skillsmp._pick_skill_dir(dirs, "prose", None, "prose") == ""
+        assert skillsmp._pick_skill_dir(dirs, "prose", None, "other") is None
+
+    def test_no_match(self):
+        assert skillsmp._pick_skill_dir(self.DIRS, "missing", None) is None
+
+    def test_blob_sha_matches_git(self):
+        # `printf 'hello\n' | git hash-object --stdin`
+        assert skillsmp._git_blob_sha("hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"

@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Callable, NoReturn
 
 __version__ = "1.3.0"
@@ -40,6 +47,15 @@ SOURCE_LABELS = {"skills.sh": "skills.sh", "skillsmp": "SkillsMP"}
 SORTS = {"skills.sh": ("relevance", "installs"), "skillsmp": ("stars", "recent")}
 DEFAULT_SORT = {source: sorts[0] for source, sorts in SORTS.items()}
 DESC_PLAIN_LIMIT = 120
+GITHUB_API = "https://api.github.com"
+# Where in its repo each skills.sh skill lives, cached on disk because
+# finding out means downloading the repo's whole file tree.
+SKILL_PATH_TTL = 7 * 86400
+SKILL_PATH_CACHE = "skill-paths.json"
+# GitHub resolves a query's lookups one by one (~70ms each), so small
+# queries in parallel beat one big one.
+GRAPHQL_BATCH = 5
+GITHUB_WORKERS = 10
 
 # --- TTY / formatting helpers ---
 
@@ -138,6 +154,8 @@ def _full_help(color: bool) -> str:
 {bold("Environment:")}
   {lit("SKILLSMP_API_KEY")}    SkillsMP API key (optional, raises its daily search quota).
                       Read from env or ~/.env. Never sent to skills.sh.
+  {lit("GITHUB_TOKEN")}        For skills.sh results' last-commit dates (falls back to
+                      GH_TOKEN, then `gh auth token`). Only sent to GitHub.
 
 Docs: https://github.com/masonc15/skillsmp
 """
@@ -437,6 +455,7 @@ def _normalize_skill(skill: dict) -> dict:
         "contentLanguage": skill.get("contentLanguage"),
         "registry": registry,
         "repo": skill.get("repo"),
+        "repoMissing": skill.get("repoMissing", False),
     }
     d["id"] = skill.get("id") or f"{d['author']}/{d['name']}"
     d["installCommand"] = _install_command(d)
@@ -445,9 +464,14 @@ def _normalize_skill(skill: dict) -> dict:
 
 def _skill_stats(d: dict) -> str:
     if d["registry"] == "skills.sh":
-        if d["installs"] is None:
-            return "installs unknown"
-        return f"{_format_stars(d['installs'])} installs"
+        stats = "installs unknown"
+        if d["installs"] is not None:
+            stats = f"{_format_stars(d['installs'])} installs"
+        if d["updatedAt"]:
+            stats += f", updated {_format_timestamp(d['updatedAt'])}"
+        elif d["repoMissing"]:
+            stats += ", GitHub repo deleted"
+        return stats
     return f"{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}"
 
 
@@ -512,6 +536,7 @@ def _print_skill_plain(skill: dict) -> None:
         d["githubUrl"],
         d["contentLanguage"] or "",
         d["registry"],
+        _format_timestamp(d["updatedAt"]) if d["updatedAt"] else "",
     ]
     print("\t".join(parts))
 
@@ -699,6 +724,9 @@ def _cmd_search(
         skills, pagination, excluded = run(used)
     else:
         fell_back = None
+
+    if used == "skills.sh" and skills:
+        _add_commit_dates(skills)
 
     if output_json:
         extra = {"exclude": exclude, "excluded": excluded} if exclude else {}
@@ -890,6 +918,261 @@ def _get_skill_md(d: dict) -> str | None:
     return _fetch_skill_md(d["githubUrl"])
 
 
+# --- last-commit dates for skills.sh skills, from GitHub ---
+
+
+@lru_cache(maxsize=1)
+def _github_token() -> str | None:
+    token = (
+        os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or _read_dotenv_key("GITHUB_TOKEN")
+    )
+    if token or not shutil.which("gh"):
+        return token
+    try:
+        out = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _github_request(path: str, payload: dict | None = None) -> urllib.request.Request:
+    headers = {
+        "User-Agent": f"skillsmp-cli/{__version__}",
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {_github_token()}",
+    }
+    data = json.dumps(payload).encode() if payload is not None else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    return urllib.request.Request(f"{GITHUB_API}{path}", data=data, headers=headers)
+
+
+def _git_blob_sha(text: str) -> str:
+    data = text.encode()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+# Trees already fetched this run, so the TUI's next page doesn't refetch them.
+_repo_trees: dict[str, dict[str, str]] = {}
+
+
+def _repo_skill_dirs(repo: str) -> dict[str, str]:
+    """Every folder in a GitHub repo with a SKILL.md, mapped to its blob SHA."""
+    if repo in _repo_trees:
+        return _repo_trees[repo]
+    tree = json.loads(_fetch(_github_request(f"/repos/{repo}/git/trees/HEAD?recursive=1")))
+    _repo_trees[repo] = dirs = {
+        t["path"].rpartition("/")[0]: t["sha"]
+        for t in tree.get("tree", [])
+        if t.get("type") == "blob" and (t["path"] == "SKILL.md" or t["path"].endswith("/SKILL.md"))
+    }
+    return dirs
+
+
+def _pick_skill_dir(
+    dirs: dict[str, str], name: str, skill_md: str | None, repo_name: str = ""
+) -> str | None:
+    """The folder a skill lives in: the one whose SKILL.md matches, else the
+    one named after it (the repo's root counts as named after the repo),
+    else the repo's only skill."""
+    def shallowest(paths):
+        return min(paths, key=lambda p: (p.count("/"), p)) if paths else None
+
+    if skill_md is not None:
+        sha = _git_blob_sha(skill_md)
+        found = shallowest([d for d, blob in dirs.items() if blob == sha])
+        if found is not None:
+            return found
+    found = shallowest(
+        [d for d in dirs if (d.rpartition("/")[2] or repo_name).lower() == name.lower()]
+    )
+    if found is not None:
+        return found
+    return next(iter(dirs)) if len(dirs) == 1 else None
+
+
+class _SkillPathCache:
+    """{skill ID: [folder, when it was found]}, kept on disk.
+
+    The folder is None if it couldn't be found, or False if the repo is gone.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.entries: dict[str, list] | None = None
+
+    @staticmethod
+    def path() -> str:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        return os.path.join(base, "skillsmp", SKILL_PATH_CACHE)
+
+    def _load(self) -> dict[str, list]:
+        if self.entries is None:
+            try:
+                with open(self.path(), encoding="utf-8") as f:
+                    loaded = json.load(f)
+                self.entries = loaded if isinstance(loaded, dict) else {}
+            except (OSError, ValueError):
+                self.entries = {}
+        return self.entries
+
+    def get(self, skill_id: str) -> tuple[bool, str | None | bool]:
+        with self.lock:
+            entry = self._load().get(skill_id)
+        if not isinstance(entry, list) or len(entry) != 2:
+            return False, None
+        if time.time() - entry[1] > SKILL_PATH_TTL:
+            return False, None
+        return True, entry[0]
+
+    def update(self, found: dict[str, str | None | bool]) -> None:
+        if not found:
+            return
+        with self.lock:
+            entries = self._load()
+            now = int(time.time())
+            entries.update({k: [v, now] for k, v in found.items()})
+            path = self.path()
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(entries, f)
+                os.replace(tmp, path)
+            except OSError:
+                pass  # A cache that can't be saved just means slower lookups.
+
+
+_skill_paths = _SkillPathCache()
+
+
+def _last_commit_dates(targets: list[tuple[str, str]]) -> dict[tuple[str, str], str | None]:
+    """When each (repo, folder) last changed, from parallel GraphQL queries."""
+    batches = [targets[i : i + GRAPHQL_BATCH] for i in range(0, len(targets), GRAPHQL_BATCH)]
+    dates: dict[tuple[str, str], str | None] = {}
+    if len(batches) <= 1:
+        for batch in batches:
+            dates.update(_last_commit_dates_batch(batch))
+        return dates
+    with ThreadPoolExecutor(max_workers=GITHUB_WORKERS) as pool:
+        for found in pool.map(_last_commit_dates_batch, batches):
+            dates.update(found)
+    return dates
+
+
+def _last_commit_dates_batch(batch: list[tuple[str, str]]) -> dict[tuple[str, str], str | None]:
+    dates: dict[tuple[str, str], str | None] = {}
+    if batch:
+        fields = []
+        for i, (repo, folder) in enumerate(batch):
+            owner, name = repo.split("/")
+            path = f", path: {json.dumps(folder)}" if folder else ""
+            fields.append(
+                f"r{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ defaultBranchRef {{ target {{ ... on Commit {{ history(first: 1{path}) "
+                f"{{ nodes {{ committedDate }} }} }} }} }} }}"
+            )
+        query = "query { " + " ".join(fields) + " }"
+        # Missing repos come back as errors next to the data for the rest.
+        data = json.loads(_fetch(_github_request("/graphql", {"query": query}))).get("data") or {}
+        for i, target in enumerate(batch):
+            try:
+                nodes = data[f"r{i}"]["defaultBranchRef"]["target"]["history"]["nodes"]
+                dates[target] = nodes[0]["committedDate"] if nodes else None
+            except (KeyError, TypeError, IndexError):
+                dates[target] = None
+    return dates
+
+
+def _commit_dates(
+    skills: list[dict], skill_mds: dict[str, str] | None = None
+) -> dict[str, dict]:
+    """{"updatedAt", "repoMissing"} for each skills.sh skill, by skill ID.
+
+    updatedAt is the last commit to the skill's folder. It's None when that
+    can't be known: no GitHub repo, a folder that can't be found, or no
+    GitHub token. repoMissing means the repo itself is gone. Raises
+    FetchError only if GitHub itself fails.
+    """
+    skill_mds = skill_mds or {}
+    on_github = [d for d in skills if d["registry"] == "skills.sh" and (d.get("repo") or "").count("/") == 1]
+    info = {d["id"]: {"updatedAt": None, "repoMissing": False} for d in skills}
+    if not on_github or not _github_token():
+        return info
+
+    # A folder path, None if it couldn't be found, or False if the repo is gone.
+    folders: dict[str, str | None | bool] = {}
+    unknown: dict[str, list[dict]] = {}
+    for d in on_github:
+        cached, folder = _skill_paths.get(d["id"])
+        if cached:
+            folders[d["id"]] = folder
+        else:
+            unknown.setdefault(d["repo"], []).append(d)
+
+    def resolve(repo: str) -> dict[str, str | None | bool]:
+        try:
+            dirs = _repo_skill_dirs(repo)
+        except FetchError as e:
+            if e.payload.get("code") == 404:
+                return {d["id"]: False for d in unknown[repo]}
+            if e.payload.get("code") == 409:  # an empty repo
+                return {d["id"]: None for d in unknown[repo]}
+            return {}  # Not cached, so it's retried next time.
+        except ValueError:
+            return {}
+        repo_name = repo.split("/")[1]
+        found: dict[str, str | None | bool] = {}
+        for d in unknown[repo]:
+            skill_md = skill_mds.get(d["id"])
+            folder = _pick_skill_dir(dirs, d["name"], skill_md, repo_name)
+            if folder is None and skill_md is None and len(dirs) > 1:
+                # Named differently from its folder: match on its contents.
+                folder = _pick_skill_dir(dirs, d["name"], _get_skill_md(d), repo_name)
+            found[d["id"]] = folder
+        return found
+
+    if unknown:
+        with ThreadPoolExecutor(max_workers=GITHUB_WORKERS) as pool:
+            for found in pool.map(resolve, unknown):
+                _skill_paths.update(found)
+                folders.update(found)
+
+    targets = {}
+    for d in on_github:
+        folder = folders.get(d["id"])
+        if folder is False:
+            info[d["id"]]["repoMissing"] = True
+        elif folder is not None:
+            targets[d["id"]] = (d["repo"], folder)
+    by_target = _last_commit_dates(list(dict.fromkeys(targets.values())))
+    for skill_id, target in targets.items():
+        info[skill_id]["updatedAt"] = by_target.get(target)
+    return info
+
+
+def _missing_token_hint() -> str:
+    return "last-commit dates need a GitHub token (set GITHUB_TOKEN or run gh auth login)"
+
+
+def _add_commit_dates(skills: list[dict], skill_mds: dict[str, str] | None = None) -> None:
+    """Fill in updatedAt on skills.sh results, warning (not failing) if it can't."""
+    if not _github_token():
+        _warn(_missing_token_hint())
+        return
+    try:
+        info = _commit_dates([_normalize_skill(s) for s in skills], skill_mds)
+    except (FetchError, ValueError) as e:
+        _warn(f"couldn't get last-commit dates from GitHub ({e})")
+        return
+    for skill in skills:
+        skill.update(info.get(_normalize_skill(skill)["id"], {}))
+
+
 def _find_skill_skillssh(parts: list[str]) -> list[dict]:
     """skills.sh hits for owner/name or owner/repo/name, most installed first."""
     owner, name = parts[0], parts[-1]
@@ -948,6 +1231,8 @@ def _cmd_show(
         _show_error(f"skill not found: {spec}", output_json=output_json)
     if not d["description"] and skill_md:
         d["description"] = _frontmatter_description(skill_md)
+    if d["registry"] == "skills.sh":
+        _add_commit_dates([d], {d["id"]: skill_md} if skill_md is not None else None)
 
     if output_json:
         d["skillMd"] = skill_md
