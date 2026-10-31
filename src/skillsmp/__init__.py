@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from typing import NoReturn
+from typing import Callable, NoReturn
 
 __version__ = "1.3.0"
 
@@ -174,10 +174,18 @@ def _retry_delay(attempt: int) -> float:
     return delay * random.uniform(1.0, 1.3)
 
 
-def _fetch_with_retry(
-    req: urllib.request.Request, *, use_json_errors: bool = False
+class FetchError(Exception):
+    """A request failed for good. `payload` is the --json error object."""
+
+    def __init__(self, message: str, payload: dict) -> None:
+        super().__init__(message)
+        self.payload = payload
+
+
+def _fetch(
+    req: urllib.request.Request, *, on_retry: Callable[[str], None] | None = None
 ) -> bytes:
-    """GET/POST with retries; on failure, report the error and exit 1."""
+    """GET/POST with retries; raise FetchError once they run out."""
     last_exc: Exception | None = None
     for attempt in range(RETRY_MAX_ATTEMPTS):
         try:
@@ -192,15 +200,12 @@ def _fetch_with_retry(
                     label = f"server error ({e.code})"
                 else:
                     label = f"network error: {e.reason}"
-                print(
-                    f"skillsmp: {label}, retrying ({retries_left} left)...",
-                    file=sys.stderr,
-                )
+                if on_retry:
+                    on_retry(f"{label}, retrying ({retries_left} left)...")
                 time.sleep(_retry_delay(attempt))
                 continue
             break
 
-    # All retries exhausted or non-retryable error — report and exit.
     if isinstance(last_exc, urllib.error.HTTPError):
         body: dict = {}
         try:
@@ -208,30 +213,47 @@ def _fetch_with_retry(
         except Exception:
             pass
         msg = body.get("error", {}).get("message", last_exc.reason)
-        payload = {"error": msg, "code": last_exc.code}
-        human = f"API error ({last_exc.code}): {msg}"
-    else:
-        payload = {"error": str(last_exc.reason)}
-        human = f"network error: {last_exc.reason}"
-
-    if use_json_errors:
-        json.dump(payload, sys.stdout, indent=2)
-        print()
-    else:
-        print(f"skillsmp: {human}", file=sys.stderr)
-    raise SystemExit(1)
+        raise FetchError(
+            f"API error ({last_exc.code}): {msg}", {"error": msg, "code": last_exc.code}
+        )
+    raise FetchError(
+        f"network error: {last_exc.reason}", {"error": str(last_exc.reason)}
+    )
 
 
-def _api_request(
-    endpoint: str, params: dict, *, use_json_errors: bool = False
-) -> dict:
+def _fetch_with_retry(
+    req: urllib.request.Request, *, use_json_errors: bool = False
+) -> bytes:
+    """Like _fetch, but report a failure and exit 1."""
+
+    def warn(msg: str) -> None:
+        print(f"skillsmp: {msg}", file=sys.stderr)
+
+    try:
+        return _fetch(req, on_retry=warn)
+    except FetchError as e:
+        if use_json_errors:
+            json.dump(e.payload, sys.stdout, indent=2)
+            print()
+        else:
+            warn(str(e))
+        raise SystemExit(1)
+
+
+def _api_url_request(endpoint: str, params: dict) -> urllib.request.Request:
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     headers = {"User-Agent": f"skillsmp-cli/{__version__}"}
     # Anonymous requests work too, but with much lower rate limits.
     api_key = _get_api_key()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(f"{BASE_URL}/{endpoint}?{qs}", headers=headers)
+    return urllib.request.Request(f"{BASE_URL}/{endpoint}?{qs}", headers=headers)
+
+
+def _api_request(
+    endpoint: str, params: dict, *, use_json_errors: bool = False
+) -> dict:
+    req = _api_url_request(endpoint, params)
     return json.loads(_fetch_with_retry(req, use_json_errors=use_json_errors))
 
 
