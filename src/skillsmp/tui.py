@@ -1,4 +1,4 @@
-"""Full-screen browser for SkillsMP search results (`skillsmp -i`)."""
+"""Full-screen browser for skills.sh and SkillsMP search results (`skillsmp -i`)."""
 
 from __future__ import annotations
 
@@ -35,21 +35,23 @@ SKILL_MD_MAX_CHARS = 60_000
 class Search:
     query: str
     exclude: tuple[str, ...] = ()
-    sort: str = "stars"
+    sort: str = "relevance"
     page: int = 1
     limit: int = 20
     category: str | None = None
     occupation: str | None = None
     language: str | None = None
+    source: str = "skills.sh"
+    # Try SkillsMP when skills.sh has nothing (or fails) on page 1.
+    fallback: bool = False
 
     def params(self) -> dict:
-        return {
-            "q": self.query,
-            "sortBy": self.sort,
-            "category": self.category,
-            "occupation": self.occupation,
-            "language": self.language,
-        }
+        return core._search_params(
+            self.source, self.query, self.sort, self.category, self.occupation, self.language
+        )
+
+    def on_skillsmp(self) -> Search:
+        return replace(self, source="skillsmp", sort=core.DEFAULT_SORT["skillsmp"], fallback=False)
 
 
 def parse_query(text: str) -> tuple[str, tuple[str, ...]]:
@@ -85,10 +87,10 @@ class _NotCached(Exception):
 
 
 class Client:
-    """Caching, thread-safe access to the search API and SKILL.md files.
+    """Caching, thread-safe access to both search APIs and SKILL.md files.
 
-    Raw API pages are cached rather than result pages, so changing exclusions
-    or paging back re-filters what's already here without a request.
+    Raw API responses are cached rather than result pages, so changing
+    exclusions or paging back re-filters what's already here without a request.
     """
 
     def __init__(self, on_retry=None) -> None:
@@ -102,11 +104,11 @@ class Client:
         self._skill_md: dict[str, str | None] = {}
 
     @staticmethod
-    def _key(params: dict) -> tuple:
-        return tuple(sorted((k, str(v)) for k, v in params.items() if v is not None))
+    def _key(source: str, params: dict) -> tuple:
+        return (source, *sorted((k, str(v)) for k, v in params.items() if v is not None))
 
-    def _request_json(self, params: dict) -> dict:
-        key = self._key(params)
+    def _request_json(self, source: str, params: dict) -> dict:
+        key = self._key(source, params)
         while True:
             with self._lock:
                 if key in self._raw:
@@ -121,9 +123,11 @@ class Client:
                 event.wait()
                 continue
             try:
-                req = core._api_url_request("search", params)
+                req = core._search_request(source, params)
+                # Only SkillsMP meters searches.
+                on_headers = self._track_quota if source == "skillsmp" else None
                 try:
-                    raw = core._fetch(req, on_retry=self.on_retry, on_headers=self._track_quota)
+                    raw = core._fetch(req, on_retry=self.on_retry, on_headers=on_headers)
                 except core.FetchError as e:
                     if e.code in core.QUOTA_ERROR_CODES:
                         self.exhausted = True
@@ -149,76 +153,117 @@ class Client:
                     pass
                 return
 
-    def can_prefetch(self) -> bool:
+    def can_prefetch(self, source: str) -> bool:
+        if source == "skills.sh":
+            return True
         if self.exhausted:
             return False
         return self.quota is None or self.quota[0] > PREFETCH_MIN_REMAINING
 
-    def _cached_json(self, params: dict) -> dict:
+    def _cached_json(self, source: str, params: dict) -> dict:
         with self._lock:
-            data = self._raw.get(self._key(params))
+            data = self._raw.get(self._key(source, params))
         if data is None:
             raise _NotCached
         return data
 
-    def _run(self, search: Search, request_json):
-        # Always read the API 50 at a time and cut display pages from that:
-        # one request covers a few pages, and exclusions just re-filter it.
+    def _run(self, search: Search, fetch):
+        # SkillsMP is read 50 at a time and skills.sh 200 at once; display
+        # pages are cut from that, and exclusions just re-filter it.
         needed = -(-search.page * search.limit // core.MAX_LIMIT)
         return core._search(
             search.params(),
             list(search.exclude),
             limit=search.limit,
             page=search.page,
-            request_json=request_json,
+            request_json=lambda params: fetch(search.source, params),
             stream=True,
             max_api_pages=needed + core.EXCLUDE_MAX_REQUESTS,
+            source=search.source,
+        )
+
+    @staticmethod
+    def _falls_back(search: Search, result) -> bool:
+        return (
+            search.fallback
+            and search.source == "skills.sh"
+            and search.page == 1
+            and (result is None or not result[0])
         )
 
     def search(self, search: Search):
-        """Blocking search; raises core.FetchError."""
-        return self._run(search, self._request_json)
+        """Blocking search, returning (search actually run, result).
+
+        That's a SkillsMP search when `search` falls back. Raises
+        core.FetchError.
+        """
+        try:
+            result = self._run(search, self._request_json)
+        except core.FetchError:
+            if not self._falls_back(search, None):
+                raise
+            result = None
+        if not self._falls_back(search, result):
+            return search, result
+        fallback = search.on_skillsmp()
+        return fallback, self._run(fallback, self._request_json)
 
     def search_cached(self, search: Search):
-        """The result if every page it needs is cached, else None."""
+        """Like search(), if everything it needs is cached; else None."""
         try:
-            return self._run(search, self._cached_json)
+            result = self._run(search, self._cached_json)
+        except _NotCached:
+            return None
+        if not self._falls_back(search, result):
+            return search, result
+        fallback = search.on_skillsmp()
+        try:
+            return fallback, self._run(fallback, self._cached_json)
         except _NotCached:
             return None
 
-    def skill_md(self, github_url: str) -> str | None:
+    def skill_md(self, d: dict) -> str | None:
+        key = d["skillUrl"]
         with self._lock:
-            if github_url in self._skill_md:
-                return self._skill_md[github_url]
-        text = core._fetch_skill_md(github_url)
+            if key in self._skill_md:
+                return self._skill_md[key]
+        text = core._get_skill_md(d)
         with self._lock:
-            self._skill_md[github_url] = text
+            self._skill_md[key] = text
         return text
 
-    def skill_md_cached(self, github_url: str) -> tuple[bool, str | None]:
+    def skill_md_cached(self, d: dict) -> tuple[bool, str | None]:
         with self._lock:
-            return github_url in self._skill_md, self._skill_md.get(github_url)
+            return d["skillUrl"] in self._skill_md, self._skill_md.get(d["skillUrl"])
 
 
-def _detail_text(d: dict) -> Text:
+def _detail_text(d: dict, description: str = "") -> Text:
     t = Text()
-    t.append(f"{d['author']}/", style="dim")
+    t.append(d["id"].rpartition("/")[0] + "/", style="dim")
     t.append(d["name"], style="bold")
     t.append("\n")
-    meta = [f"★ {core._format_stars(d['stars'])}", f"updated {core._format_timestamp(d['updatedAt'])}"]
+    meta = [core._skill_stats(d).replace(", ", "  ·  "), f"from {core.SOURCE_LABELS[d['registry']]}"]
     if d["contentLanguage"]:
         meta.append(f"lang {d['contentLanguage']}")
     t.append("  ·  ".join(meta), style="dim")
     t.append("\n\n")
-    if d["description"]:
-        t.append(" ".join(d["description"].split()))
+    description = d["description"] or description
+    if description:
+        t.append(" ".join(description.split()))
         t.append("\n\n")
-    for label, url in (("github  ", d["githubUrl"]), ("skillsmp", d["skillUrl"])):
-        if url:
+    rows = (("github ", d["githubUrl"]), ("web    ", d["skillUrl"]), ("install", d["installCommand"]))
+    for label, value in rows:
+        if value:
             t.append(f"{label} ", style="dim")
-            t.append(url, style="underline")
+            t.append(value, style="bold" if label == "install" else "underline")
             t.append("\n")
     return t
+
+
+def _metric(d: dict) -> str:
+    if d["registry"] == "skills.sh":
+        return f"↓ {core._format_stars(d['installs'])}" if d["installs"] is not None else ""
+    return f"★ {core._format_stars(d['stars'])}"
 
 
 def _option(d: dict) -> Option:
@@ -230,8 +275,13 @@ def _option(d: dict) -> Option:
     row = Table.grid(expand=True, padding=(0, 1))
     row.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     row.add_column(justify="right", no_wrap=True)
-    row.add_row(name, Text(f"★ {core._format_stars(d['stars'])}", style="dim"))
+    row.add_row(name, Text(_metric(d), style="dim"))
     return Option(row)
+
+
+def _missing_skill_md(d: dict) -> str:
+    where = "skills.sh" if d["registry"] == "skills.sh" else "GitHub"
+    return f"*Couldn't fetch SKILL.md from {where}.*"
 
 
 class Results(OptionList):
@@ -249,26 +299,28 @@ class SkillScreen(Screen):
     BINDINGS = [
         Binding("escape,q,enter", "app.pop_screen", "Back"),
         Binding("o", "open('githubUrl')", "GitHub"),
-        Binding("w", "open('skillUrl')", "SkillsMP"),
+        Binding("w", "open('skillUrl')", "Web page"),
+        Binding("i", "copy_install", "Copy install"),
         Binding("y", "copy_url", "Copy URL"),
         Binding("j", "scroll('down')", show=False),
         Binding("k", "scroll('up')", show=False),
     ]
 
-    def __init__(self, skill: dict, markdown: str) -> None:
+    def __init__(self, skill: dict, markdown: str, description: str = "") -> None:
         super().__init__()
         self.skill = skill
         self.markdown = markdown
+        self.description = description
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="reader"):
-            yield Static(_detail_text(self.skill), id="reader-meta")
+            yield Static(_detail_text(self.skill, self.description), id="reader-meta")
             yield Markdown(self.markdown)
         yield Footer()
 
     def on_mount(self) -> None:
         reader = self.query_one("#reader")
-        reader.border_title = f"{self.skill['author']}/{self.skill['name']}"
+        reader.border_title = self.skill["id"]
         reader.focus()
 
     def action_scroll(self, direction: str) -> None:
@@ -279,7 +331,10 @@ class SkillScreen(Screen):
         open_skill_url(self.app, self.skill, field)
 
     def action_copy_url(self) -> None:
-        copy_skill_url(self.app, self.skill)
+        copy_text(self.app, self.skill["githubUrl"] or self.skill["skillUrl"])
+
+    def action_copy_install(self) -> None:
+        copy_text(self.app, self.skill["installCommand"])
 
 
 def open_skill_url(app: App, d: dict, field: str) -> None:
@@ -287,12 +342,13 @@ def open_skill_url(app: App, d: dict, field: str) -> None:
         app.open_url(d[field])
 
 
-def copy_skill_url(app: App, d: dict) -> None:
-    url = d["githubUrl"] or d["skillUrl"]
-    app.copy_to_clipboard(url)  # OSC 52, which works over ssh
+def copy_text(app: App, text: str) -> None:
+    if not text:
+        return
+    app.copy_to_clipboard(text)  # OSC 52, which works over ssh
     if shutil.which("pbcopy"):
-        subprocess.run(["pbcopy"], input=url.encode(), check=False)
-    app.notify(f"Copied {url}")
+        subprocess.run(["pbcopy"], input=text.encode(), check=False)
+    app.notify(f"Copied {text}")
 
 
 class SkillsmpApp(App):
@@ -322,26 +378,32 @@ class SkillsmpApp(App):
     BINDINGS = [
         Binding("/", "focus_query", "Search"),
         Binding("escape", "focus_results", "Results", key_display="esc"),
-        Binding("right,]", "page(1)", "Next page", key_display="→"),
-        Binding("left,[", "page(-1)", "Prev page", key_display="←"),
+        Binding("right,]", "page(1)", "Next", key_display="→"),
+        Binding("left,[", "page(-1)", "Prev", key_display="←"),
         Binding("s", "toggle_sort", "Sort"),
+        Binding("b", "toggle_source", "Source"),
         Binding("x", "hide('name')", "Hide name"),
         Binding("X", "hide('author')", "Hide author"),
         Binding("o", "open('githubUrl')", "GitHub"),
-        Binding("w", "open('skillUrl')", "SkillsMP", show=False),
-        Binding("y", "copy_url", "Copy URL"),
+        Binding("w", "open('skillUrl')", "Web page", show=False),
+        Binding("i", "copy_install", "Copy install"),
+        Binding("y", "copy_url", "Copy URL", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
     # Actions that act on the results list, so are off while the reader is up.
     MAIN_ACTIONS = {
-        "focus_query", "focus_results", "page", "toggle_sort", "hide", "open", "copy_url",
+        "focus_query", "focus_results", "page", "toggle_sort", "toggle_source", "hide",
+        "open", "copy_url", "copy_install",
     }
 
     def __init__(self, search: Search, client: Client | None = None) -> None:
         super().__init__()
         # Start in the results when there's a query, else in the search box.
         self.AUTO_FOCUS = "#results" if search.query else "#query"
+        # New queries start from here: the chosen source, sort and fallback.
+        # self.search can differ, e.g. after falling back to SkillsMP.
+        self.home = search
         self.search = search
         self.client = client or Client(on_retry=self._notify_retry)
         self.skills: list[dict] = []
@@ -392,7 +454,7 @@ class SkillsmpApp(App):
         self.search = search
         cached = self.client.search_cached(search)
         if cached is not None:
-            self.show_results(search, cached)
+            self.show_results(search, *cached)
             return
         self.loading_search = search
         self.results.add_class("stale")
@@ -403,11 +465,11 @@ class SkillsmpApp(App):
     @work(thread=True, exclusive=True, group="search")
     def fetch(self, search: Search) -> None:
         try:
-            result = self.client.search(search)
+            used, result = self.client.search(search)
         except core.FetchError as e:
             self.call_from_thread(self.show_error, search, str(e))
             return
-        self.call_from_thread(self.show_results, search, result)
+        self.call_from_thread(self.show_results, search, used, result)
 
     @work(thread=True, group="prefetch")
     def prefetch(self, search: Search) -> None:
@@ -416,9 +478,12 @@ class SkillsmpApp(App):
         except core.FetchError:
             pass  # The page will be fetched (and the error shown) if visited.
 
-    def show_results(self, search: Search, result) -> None:
+    def show_results(self, search: Search, used: Search, result) -> None:
         if search != self.search:
             return  # A newer search has replaced this one.
+        if used != search:
+            self.search = used
+            self.notify(f"Nothing on skills.sh for “{search.query}”, so showing SkillsMP.")
         self.loading_search = None
         self.skills, self.pagination, self.excluded = result
         self.results.remove_class("stale")
@@ -428,11 +493,11 @@ class SkillsmpApp(App):
         self.show_detail(self.current())
         self.set_status()
         self.refresh_bindings()
-        following = replace(search, page=search.page + 1)
+        following = replace(self.search, page=self.search.page + 1)
         if (
             self.pagination.get("hasNext")
             and self.client.search_cached(following) is None
-            and self.client.can_prefetch()
+            and self.client.can_prefetch(following.source)
         ):
             self.prefetch(following)
 
@@ -450,25 +515,28 @@ class SkillsmpApp(App):
         status.set_class(error, "error")
         if message is None:
             s = self.search
+            parts = [core.SOURCE_LABELS[s.source]]
             if not self.skills:
-                parts = [f"No results for “{s.query}”"]
-            elif self.pagination.get("totalIsExact", True):
+                parts.append(f"no results for “{s.query}”")
+            elif self.pagination.get("totalIsExact", True) or s.source == "skills.sh":
+                # skills.sh's total is only inexact when it hit its cap.
                 total = self.pagination.get("total", len(self.skills))
                 pages = self.pagination.get("totalPages", 1)
-                parts = [f"{total} results", f"page {s.page}/{pages}"]
+                plus = "" if self.pagination.get("totalIsExact", True) else "+"
+                parts += [f"{total}{plus} results", f"page {s.page}/{pages}"]
             else:
                 more = "more →" if self.pagination.get("hasNext") else "last page"
-                parts = [f"page {s.page}", more]
+                parts += [f"page {s.page}", more]
             parts.append(f"sort: {s.sort}")
             if self.excluded:
                 parts.append(f"{self.excluded} hidden")
-            if self.client.quota:
+            if s.source == "skillsmp" and self.client.quota:
                 remaining, limit, period = self.client.quota
                 parts.append(f"{remaining}/{limit} searches left {period}")
             filters = [
                 f"{k} {v}"
                 for k, v in (("category", s.category), ("occupation", s.occupation), ("language", s.language))
-                if v
+                if v and s.source == "skillsmp"
             ]
             message = "  ·  ".join(parts + filters)
         status.update(message)
@@ -479,7 +547,7 @@ class SkillsmpApp(App):
         query, exclude = parse_query(self.box.value)
         if not query:
             return None
-        return replace(self.search, query=query, exclude=exclude, page=1)
+        return replace(self.home, query=query, exclude=exclude, page=1, limit=self.search.limit)
 
     @on(Input.Changed, "#query")
     def query_changed(self) -> None:
@@ -490,8 +558,10 @@ class SkillsmpApp(App):
     def search_if_changed(self) -> None:
         """Apply typing when it costs no request (e.g. editing exclusions)."""
         search = self.search_from_box()
-        if search is None or (search.query, search.exclude) == (self.search.query, self.search.exclude):
+        if search is None or search == self.search:
             return
+        if (search.query, search.exclude) == (self.search.query, self.search.exclude):
+            return  # e.g. self.search is this search's SkillsMP fallback
         if self.client.search_cached(search) is not None:
             self.go(search)
         else:
@@ -531,27 +601,29 @@ class SkillsmpApp(App):
             return
         meta.update(_detail_text(d))
         detail.scroll_home(animate=False)
-        url = d["githubUrl"]
-        cached, text = self.client.skill_md_cached(url)
+        cached, text = self.client.skill_md_cached(d)
         if cached:
-            self.set_skill_md(url, text)
+            self.set_skill_md(d["skillUrl"], text)
         else:
-            self.set_skill_md(url, "*Loading SKILL.md…*", final=False)
+            self.set_skill_md(d["skillUrl"], "*Loading SKILL.md…*", final=False)
             self._skill_md_timer = self.set_timer(
-                SKILL_MD_DEBOUNCE, lambda: self.fetch_skill_md(url)
+                SKILL_MD_DEBOUNCE, lambda: self.fetch_skill_md(d)
             )
 
     @work(thread=True, exclusive=True, group="skill_md")
-    def fetch_skill_md(self, url: str) -> None:
-        text = self.client.skill_md(url)
-        self.call_from_thread(self.set_skill_md, url, text)
+    def fetch_skill_md(self, d: dict) -> None:
+        text = self.client.skill_md(d)
+        self.call_from_thread(self.set_skill_md, d["skillUrl"], text)
 
     def set_skill_md(self, url: str | None, text: str | None, *, final: bool = True) -> None:
         d = self.current()
-        if url is not None and (d is None or d["githubUrl"] != url):
+        if url is not None and (d is None or d["skillUrl"] != url):
             return  # The highlight moved on.
-        if final and text is None:
-            body = "*Couldn't fetch SKILL.md from GitHub.*"
+        if d is not None and final and text and not d["description"]:
+            # skills.sh search has no descriptions; SKILL.md's frontmatter does.
+            self.meta.update(_detail_text(d, core._frontmatter_description(text)))
+        if final and text is None and d is not None:
+            body = _missing_skill_md(d)
         else:
             body = strip_frontmatter(text or "")[:SKILL_MD_MAX_CHARS]
         key = f"{url}\0{body}"
@@ -564,12 +636,13 @@ class SkillsmpApp(App):
         d = self.current()
         if d is None:
             return
-        cached, text = self.client.skill_md_cached(d["githubUrl"])
+        cached, text = self.client.skill_md_cached(d)
         if not cached:
             self.notify("SKILL.md is still loading.")
             return
-        body = strip_frontmatter(text) if text else "*Couldn't fetch SKILL.md from GitHub.*"
-        self.push_screen(SkillScreen(d, body[:SKILL_MD_MAX_CHARS]))
+        body = strip_frontmatter(text) if text else _missing_skill_md(d)
+        description = core._frontmatter_description(text or "")
+        self.push_screen(SkillScreen(d, body[:SKILL_MD_MAX_CHARS], description))
 
     # --- actions ---
 
@@ -578,7 +651,7 @@ class SkillsmpApp(App):
             return False
         if action == "focus_results" and self.focused is self.results:
             return False
-        if action in ("hide", "open", "copy_url") and self.current() is None:
+        if action in ("hide", "open", "copy_url", "copy_install") and self.current() is None:
             return None  # Shown disabled in the footer.
         if action == "page":
             if self.loading_search is not None and parameters[0] > 0:
@@ -599,8 +672,19 @@ class SkillsmpApp(App):
         self.go(replace(self.search, page=self.search.page + delta))
 
     def action_toggle_sort(self) -> None:
-        sort = "recent" if self.search.sort == "stars" else "stars"
+        sorts = core.SORTS[self.search.source]
+        sort = sorts[(sorts.index(self.search.sort) + 1) % len(sorts)]
+        if self.home.source == self.search.source:
+            self.home = replace(self.home, sort=sort)
         self.go(replace(self.search, sort=sort, page=1))
+
+    def action_toggle_source(self) -> None:
+        source = "skillsmp" if self.search.source == "skills.sh" else "skills.sh"
+        sort = core.DEFAULT_SORT[source]
+        # Picking a source by hand also means no falling back from it.
+        self.home = replace(self.home, source=source, sort=sort, fallback=False)
+        if self.search.query:
+            self.go(replace(self.search, source=source, sort=sort, fallback=False, page=1))
 
     def action_hide(self, what: str) -> None:
         d = self.current()
@@ -623,7 +707,12 @@ class SkillsmpApp(App):
     def action_copy_url(self) -> None:
         d = self.current()
         if d:
-            copy_skill_url(self, d)
+            copy_text(self, d["githubUrl"] or d["skillUrl"])
+
+    def action_copy_install(self) -> None:
+        d = self.current()
+        if d:
+            copy_text(self, d["installCommand"])
 
     def _notify_retry(self, message: str) -> None:
         self.call_from_thread(self.notify, message, severity="warning")
@@ -639,5 +728,7 @@ def run(args: dict) -> None:
         category=args["category"],
         occupation=args["occupation"],
         language=args["language"],
+        source=args["source"],
+        fallback=args["fallback"],
     )
     SkillsmpApp(search).run()

@@ -13,6 +13,12 @@ import skillsmp
 from skillsmp import tui
 from skillsmp.tui import Client, Search, SkillScreen, SkillsmpApp
 
+
+def MP(query: str, **kwargs) -> Search:
+    """A SkillsMP search, which these tests' FakeAPI serves."""
+    kwargs.setdefault("sort", "stars")
+    return Search(query, source="skillsmp", **kwargs)
+
 SKILLS = [
     {
         "name": f"native-{i}" if i % 3 == 0 else f"skill-{i}",
@@ -121,18 +127,19 @@ class TestQuerySyntax:
 class TestClient:
     def test_search_caches_raw_pages(self, api):
         client = Client()
-        search = Search("q", limit=10)
+        search = MP("q", limit=10)
         assert client.search_cached(search) is None
-        skills, pagination, excluded = client.search(search)
+        used, (skills, pagination, excluded) = client.search(search)
+        assert used == search
         assert len(skills) == 10 and pagination["hasNext"] and excluded == 0
-        assert client.search_cached(search) == (skills, pagination, excluded)
+        assert client.search_cached(search) == (search, (skills, pagination, excluded))
         assert len(api.calls) == 1
 
     def test_changing_exclusions_reuses_cached_pages(self, api):
         client = Client()
-        client.search(Search("q", exclude=("native",), limit=10))
+        client.search(MP("q", exclude=("native",), limit=10))
         calls = len(api.calls)
-        skills, _, excluded = client.search_cached(Search("q", exclude=("native", "acme/"), limit=10))
+        _, (skills, _, excluded) = client.search_cached(MP("q", exclude=("native", "acme/"), limit=10))
         assert len(api.calls) == calls
         assert excluded > 0
         assert all("native" not in s["name"] and s["author"] != "acme" for s in skills)
@@ -140,7 +147,7 @@ class TestClient:
     def test_concurrent_requests_for_one_page_fetch_once(self, api):
         api.delay = 0.2
         client = Client()
-        threads = [threading.Thread(target=client.search, args=(Search("q"),)) for _ in range(3)]
+        threads = [threading.Thread(target=client.search, args=(MP("q"),)) for _ in range(3)]
         for t in threads:
             t.start()
         for t in threads:
@@ -157,7 +164,7 @@ class TestApp:
             assert app.current()["name"] == "native-0"
             assert "page 1" in str(app.status.render())
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_pages_come_from_fifty_result_requests(self, api):
         async def script(app, pilot):
@@ -179,7 +186,7 @@ class TestApp:
             assert names(app)[0] == "native-0"
             assert len(api.calls) == 2
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_prefetch_stops_when_quota_runs_low(self, api):
         api.remaining = tui.PREFETCH_MIN_REMAINING + 1
@@ -192,7 +199,7 @@ class TestApp:
             assert app.client.quota == (tui.PREFETCH_MIN_REMAINING, 50, "today")
             assert "10/50 searches left today" in str(app.status.render())
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_exhausted_quota_explains_reset(self, api):
         api.remaining = 0
@@ -204,7 +211,7 @@ class TestApp:
             assert app.status.has_class("error")
             assert app.client.exhausted
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_typing_exclusions_refilters_without_requests(self, api):
         async def script(app, pilot):
@@ -219,7 +226,7 @@ class TestApp:
             # Any further request is the background prefetch for page 2.
             assert [c["page"] for c in api.calls[1:]] in ([], ["2"])
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_typing_a_new_query_waits_for_enter(self, api):
         async def script(app, pilot):
@@ -234,7 +241,7 @@ class TestApp:
             await until(pilot, lambda: app.search.query == "react" and app.loading_search is None)
             assert len(api.calls) == 2
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_prev_page_disabled_on_first_page(self, api):
         async def script(app, pilot):
@@ -242,7 +249,7 @@ class TestApp:
             await pilot.press("left")
             assert app.search.page == 1
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_hide_keys_update_search_box(self, api):
         async def script(app, pilot):
@@ -257,7 +264,7 @@ class TestApp:
             assert app.skills and all(s["author"] == "other" for s in app.skills)
             assert "hidden" in str(app.status.render())
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_typing_in_search_box_does_not_fire_bindings(self, api):
         async def script(app, pilot):
@@ -273,7 +280,7 @@ class TestApp:
             assert app.search.query == "sxq"
             assert app.focused is app.results
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_sort_toggle(self, api):
         async def script(app, pilot):
@@ -282,13 +289,14 @@ class TestApp:
             await until(pilot, lambda: app.search.sort == "recent" and app.loading_search is None)
             assert names(app)[0] == "skill-119"
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_reader_opens_and_closes(self, api):
         async def script(app, pilot):
             await until(pilot, lambda: app.skills)
-            url = app.current()["githubUrl"]
-            await until(pilot, lambda: app.client.skill_md_cached(url)[0])
+            d = app.current()
+            url = d["githubUrl"]
+            await until(pilot, lambda: app.client.skill_md_cached(d)[0])
             await pilot.press("enter")
             assert isinstance(app.screen, SkillScreen)
             assert app.screen.markdown == f"# Doc for {url}\n"
@@ -297,7 +305,7 @@ class TestApp:
             await pilot.press("escape")
             assert not isinstance(app.screen, SkillScreen)
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_open_and_copy_use_selected_skill(self, api):
         async def script(app, pilot):
@@ -310,7 +318,7 @@ class TestApp:
             open_url.assert_called_once_with(SKILLS[0]["githubUrl"])
             assert app.clipboard == SKILLS[0]["githubUrl"]
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_fetch_error_shown_in_status(self, api):
         api.fail = True
@@ -320,7 +328,7 @@ class TestApp:
             assert "broken" in str(app.status.render())
             assert app.status.has_class("error")
 
-        run_app(Search("q"), script)
+        run_app(MP("q"), script)
 
     def test_empty_query_starts_in_search_box(self, api):
         async def script(app, pilot):
@@ -328,7 +336,119 @@ class TestApp:
             assert app.focused is app.box
             assert api.calls == []
 
-        run_app(Search(""), script)
+        run_app(MP(""), script)
+
+
+HITS = [
+    {"id": f"acme/pack/skill-{i}", "source": "acme/pack", "skillId": f"skill-{i}", "installs": i * 10}
+    for i in range(45)
+]
+
+
+class FakeBoth(FakeAPI):
+    """Serves skills.sh (HITS, or nothing) as well as SkillsMP."""
+
+    def __init__(self, hits=HITS) -> None:
+        super().__init__()
+        self.hits = hits
+        self.hosts: list[str] = []
+        self.searches: list[str] = []  # skills.sh search URLs
+
+    def __call__(self, req, on_retry=None, on_headers=None) -> bytes:
+        url = urllib.parse.urlsplit(req.full_url)
+        self.hosts.append(url.netloc)
+        if url.netloc != "skills.sh":
+            return super().__call__(req, on_retry, on_headers)
+        assert on_headers is None
+        if url.path.startswith("/api/download/"):
+            name = url.path.rsplit("/", 1)[1]
+            md = f"---\nname: {name}\ndescription: About {name}\n---\n# {name} doc\n"
+            return json.dumps({"files": [{"path": "SKILL.md", "contents": md}]}).encode()
+        self.searches.append(req.full_url)
+        return json.dumps({"skills": self.hits}).encode()
+
+
+@pytest.fixture
+def both():
+    fake = FakeBoth()
+    with mock.patch("skillsmp._fetch", fake):
+        yield fake
+
+
+class TestSkillsSh:
+    def test_one_request_serves_every_page(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            assert names(app)[0] == "skill-0" and len(app.skills) == 20
+            status = str(app.status.render())
+            assert "skills.sh" in status and "45 results" in status and "searches left" not in status
+            await pilot.press("right", "right")
+            await until(pilot, lambda: app.search.page == 3 and app.skills)
+            assert names(app) == [f"skill-{i}" for i in range(40, 45)]
+            assert len(both.searches) == 1
+            assert "skillsmp.com" not in both.hosts
+
+        run_app(Search("deploy", fallback=True), script)
+
+    def test_installs_sort_needs_no_request(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await pilot.press("s")
+            await until(pilot, lambda: app.search.sort == "installs" and app.skills)
+            assert names(app)[0] == "skill-44"
+            assert len(both.searches) == 1
+
+        run_app(Search("deploy"), script)
+
+    def test_detail_fills_description_from_skill_md(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await until(pilot, lambda: "About skill-0" in str(app.meta.render()))
+            meta = str(app.meta.render())
+            assert "npx skills add acme/pack --skill skill-0" in meta
+            with mock.patch.object(tui.shutil, "which", return_value=None):
+                await pilot.press("i")
+            assert app.clipboard == "npx skills add acme/pack --skill skill-0"
+            await pilot.press("enter")
+            assert app.screen.markdown == "# skill-0 doc\n"
+
+        run_app(Search("deploy"), script)
+
+    def test_empty_results_fall_back_to_skillsmp(self):
+        fake = FakeBoth(hits=[])
+        with mock.patch("skillsmp._fetch", fake), mock.patch(
+            "skillsmp._fetch_skill_md", lambda url: "# doc\n"
+        ):
+
+            async def script(app, pilot):
+                await until(pilot, lambda: app.skills)
+                assert app.search.source == "skillsmp" and app.search.sort == "stars"
+                assert fake.hosts[:2] == ["skills.sh", "skillsmp.com"]
+                assert "SkillsMP" in str(app.status.render())
+                # A new query starts from skills.sh again.
+                await pilot.press("/")
+                app.box.value = "other"
+                await pilot.press("enter")
+                await until(pilot, lambda: app.search.query == "other" and app.skills)
+                assert len(fake.searches) == 2
+
+            run_app(Search("deploy", fallback=True), script)
+
+    def test_source_key_switches_and_sticks(self, both):
+        with mock.patch("skillsmp._fetch_skill_md", lambda url: "# doc\n"):
+
+            async def script(app, pilot):
+                await until(pilot, lambda: app.skills)
+                await pilot.press("b")
+                await until(pilot, lambda: app.search.source == "skillsmp" and app.skills)
+                assert names(app)[0] == "native-0"
+                assert app.home.source == "skillsmp" and not app.home.fallback
+                await pilot.press("b")
+                await until(pilot, lambda: app.search.source == "skills.sh" and app.skills)
+                assert names(app)[0] == "skill-0"
+                assert len(both.searches) == 1  # served from cache
+
+            run_app(Search("deploy", fallback=True), script)
 
 
 class TestInteractiveFlag:
@@ -363,6 +483,8 @@ class TestInteractiveFlag:
         with mock.patch("sys.argv", argv), mock.patch.object(tui, "SkillsmpApp") as app_cls:
             skillsmp.main()
         app_cls.assert_called_once_with(
-            Search("react", exclude=("native",), sort="recent", limit=20, language="en")
+            Search(
+                "react", exclude=("native",), sort="recent", limit=20, language="en", source="skillsmp"
+            )
         )
         app_cls.return_value.run.assert_called_once_with()

@@ -77,21 +77,24 @@ skillsmp -x native -x affaan-m react
 
 ```
 skillsmp -i react
-skillsmp -i --sort recent --language en
+skillsmp -i --source skillsmp --sort recent
 ```
 
-Move with the arrow keys or `j`/`k`, and change pages with `←`/`→` (or `[`/`]`). `/` jumps to the search box and Enter runs the search. A word starting with `-` in the box works like `--exclude`, so `react -native` hides anything mentioning native, and exclusions apply as you type. `x` hides every skill with the highlighted skill's name and `X` hides its author; both add a term to the search box, so deleting it there brings them back. `s` switches between stars and recent, Enter opens SKILL.md full screen, `o` opens the skill on GitHub, `w` opens its SkillsMP page, `y` copies its GitHub URL, and `q` quits.
+Move with the arrow keys or `j`/`k`, and change pages with `←`/`→` (or `[`/`]`). `/` jumps to the search box and Enter runs the search. A word starting with `-` in the box works like `--exclude`, so `react -native` hides anything mentioning native, and exclusions apply as you type. `x` hides every skill with the highlighted skill's name and `X` hides its author; both add a term to the search box, so deleting it there brings them back. `s` cycles the sort (relevance and installs on skills.sh, stars and recent on SkillsMP) and `b` switches source, which then sticks for later searches. Enter opens SKILL.md full screen, `i` copies the install command, `o` opens the skill on GitHub, `w` opens its skills.sh or SkillsMP page, `y` copies its GitHub URL, and `q` quits.
 
-Searches are metered. Anonymous use and the Free plan both get 50 a day, reset at midnight UTC, so the TUI is careful with them. It fetches 50 results per request and builds pages from those, so one search covers the first two and a half pages, and adding or removing exclusions doesn't make a new request. It only fetches the next page ahead of time while more than 10 searches are left, and the status line shows how many remain.
+SkillsMP searches are metered. Anonymous use and the Free plan both get 50 a day, reset at midnight UTC, so the TUI is careful with them. It fetches 50 results per request and builds pages from those, so one search covers the first two and a half pages, and adding or removing exclusions doesn't make a new request. It only fetches the next page ahead of time while more than 10 searches are left, and the status line shows how many remain. None of that applies to skills.sh, where one request covers every page.
 
 ## Skill details
 
-`show` prints everything about one skill — full description, links, and its SKILL.md fetched straight from GitHub:
+`show` prints everything about one skill: full description, links, install command, and its SKILL.md. Give it a skills.sh ID (`owner/repo/skill`, copied from a search result) or just `owner/skill`, which picks the most installed match and lists any others. Skills hosted on a website rather than GitHub, like `docs.stripe.com/stripe-docs`, work too.
 
 ```
-skillsmp show wshobson/terraform-module-library
-skillsmp show --json wshobson/terraform-module-library
+skillsmp show hashicorp/agent-skills/terraform-test
+skillsmp show hashicorp/terraform-test
+skillsmp show --source skillsmp --json wshobson/terraform-module-library
 ```
+
+An `owner/skill` that skills.sh doesn't know falls back to SkillsMP, which fetches SKILL.md straight from GitHub.
 
 ## Flags
 
