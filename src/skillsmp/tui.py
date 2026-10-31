@@ -22,7 +22,10 @@ from textual.widgets.option_list import Option
 
 import skillsmp as core
 
-SEARCH_DEBOUNCE = 0.35
+SEARCH_DEBOUNCE = 0.2
+# Searches are metered (the Free plan gets 50 a day), so only prefetch while
+# there's plenty left.
+PREFETCH_MIN_REMAINING = 10
 SKILL_MD_DEBOUNCE = 0.15
 # Textual's Markdown widget gets sluggish on huge documents.
 SKILL_MD_MAX_CHARS = 60_000
@@ -90,6 +93,9 @@ class Client:
 
     def __init__(self, on_retry=None) -> None:
         self.on_retry = on_retry
+        # (remaining, limit, "today" or "this month") from the last response.
+        self.quota: tuple[int, int, str] | None = None
+        self.exhausted = False
         self._lock = threading.Lock()
         self._raw: dict[tuple, dict] = {}
         self._inflight: dict[tuple, threading.Event] = {}
@@ -116,7 +122,13 @@ class Client:
                 continue
             try:
                 req = core._api_url_request("search", params)
-                data = json.loads(core._fetch(req, on_retry=self.on_retry))
+                try:
+                    raw = core._fetch(req, on_retry=self.on_retry, on_headers=self._track_quota)
+                except core.FetchError as e:
+                    if e.code in core.QUOTA_ERROR_CODES:
+                        self.exhausted = True
+                    raise
+                data = json.loads(raw)
                 with self._lock:
                     self._raw[key] = data
                 return data
@@ -124,6 +136,23 @@ class Client:
                 with self._lock:
                     self._inflight.pop(key, None)
                 event.set()
+
+    def _track_quota(self, headers: dict) -> None:
+        h = {k.lower(): v for k, v in headers.items()}
+        for period, label in (("daily", "today"), ("monthly", "this month")):
+            remaining = h.get(f"x-ratelimit-{period}-remaining")
+            limit = h.get(f"x-ratelimit-{period}-limit")
+            if remaining is not None and limit is not None:
+                try:
+                    self.quota = (int(remaining), int(limit), label)
+                except ValueError:
+                    pass
+                return
+
+    def can_prefetch(self) -> bool:
+        if self.exhausted:
+            return False
+        return self.quota is None or self.quota[0] > PREFETCH_MIN_REMAINING
 
     def _cached_json(self, params: dict) -> dict:
         with self._lock:
@@ -133,12 +162,17 @@ class Client:
         return data
 
     def _run(self, search: Search, request_json):
+        # Always read the API 50 at a time and cut display pages from that:
+        # one request covers a few pages, and exclusions just re-filter it.
+        needed = -(-search.page * search.limit // core.MAX_LIMIT)
         return core._search(
             search.params(),
             list(search.exclude),
             limit=search.limit,
             page=search.page,
             request_json=request_json,
+            stream=True,
+            max_api_pages=needed + core.EXCLUDE_MAX_REQUESTS,
         )
 
     def search(self, search: Search):
@@ -394,8 +428,13 @@ class SkillsmpApp(App):
         self.show_detail(self.current())
         self.set_status()
         self.refresh_bindings()
-        if self.pagination.get("hasNext"):
-            self.prefetch(replace(search, page=search.page + 1))
+        following = replace(search, page=search.page + 1)
+        if (
+            self.pagination.get("hasNext")
+            and self.client.search_cached(following) is None
+            and self.client.can_prefetch()
+        ):
+            self.prefetch(following)
 
     def show_error(self, search: Search, message: str) -> None:
         if search != self.search:
@@ -404,7 +443,7 @@ class SkillsmpApp(App):
         self.results.remove_class("stale")
         self.set_status(message, error=True)
         self.refresh_bindings()
-        self.notify(message, severity="error")
+        self.notify(message, severity="error", timeout=8)
 
     def set_status(self, message: str | None = None, *, error: bool = False) -> None:
         status = self.status
@@ -423,6 +462,9 @@ class SkillsmpApp(App):
             parts.append(f"sort: {s.sort}")
             if self.excluded:
                 parts.append(f"{self.excluded} hidden")
+            if self.client.quota:
+                remaining, limit, period = self.client.quota
+                parts.append(f"{remaining}/{limit} searches left {period}")
             filters = [
                 f"{k} {v}"
                 for k, v in (("category", s.category), ("occupation", s.occupation), ("language", s.language))
@@ -446,9 +488,14 @@ class SkillsmpApp(App):
         self._search_timer = self.set_timer(SEARCH_DEBOUNCE, self.search_if_changed)
 
     def search_if_changed(self) -> None:
+        """Apply typing when it costs no request (e.g. editing exclusions)."""
         search = self.search_from_box()
-        if search and (search.query, search.exclude) != (self.search.query, self.search.exclude):
+        if search is None or (search.query, search.exclude) == (self.search.query, self.search.exclude):
+            return
+        if self.client.search_cached(search) is not None:
             self.go(search)
+        else:
+            self.set_status(f"Press Enter to search “{search.query}”")
 
     @on(Input.Submitted, "#query")
     def query_submitted(self) -> None:

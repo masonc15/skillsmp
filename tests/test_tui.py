@@ -23,26 +23,38 @@ SKILLS = [
         "githubUrl": f"https://github.com/acme/repo/tree/main/{i}",
         "skillUrl": f"https://skillsmp.com/skills/{i}",
     }
-    for i in range(45)
+    for i in range(120)
 ]
 
 
 class FakeAPI:
     """Stands in for skillsmp._fetch, serving SKILLS in pages."""
 
-    def __init__(self, delay: float = 0.0, fail: bool = False) -> None:
+    def __init__(self, delay: float = 0.0, fail: bool = False, remaining: int = 50) -> None:
         self.calls: list[dict] = []
         self.delay = delay
         self.fail = fail
+        self.remaining = remaining
         self.lock = threading.Lock()
 
-    def __call__(self, req, on_retry=None) -> bytes:
+    def __call__(self, req, on_retry=None, on_headers=None) -> bytes:
         params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(req.full_url).query))
         with self.lock:
             self.calls.append(params)
+            self.remaining = max(self.remaining - 1, -1)
+            remaining = self.remaining
         time.sleep(self.delay)
         if self.fail:
-            raise skillsmp.FetchError("API error (429): slow down", {"error": "slow down"})
+            raise skillsmp.FetchError("API error (500): broken", {"error": "broken"})
+        if remaining < 0:
+            if on_headers:
+                on_headers({"X-RateLimit-Daily-Limit": "50", "X-RateLimit-Daily-Remaining": "0"})
+            raise skillsmp.FetchError(
+                "SkillsMP search quota used up (allowance exhausted); it resets in 23h 6m",
+                {"error": "allowance exhausted", "code": 429, "errorCode": "DAILY_QUOTA_EXCEEDED"},
+            )
+        if on_headers:
+            on_headers({"X-RateLimit-Daily-Limit": "50", "X-RateLimit-Daily-Remaining": str(remaining)})
         limit, page = int(params["limit"]), int(params["page"])
         skills = SKILLS if params.get("sortBy") != "recent" else SKILLS[::-1]
         chunk = skills[(page - 1) * limit : page * limit]
@@ -147,16 +159,80 @@ class TestApp:
 
         run_app(Search("q"), script)
 
-    def test_next_page_is_prefetched(self, api):
+    def test_pages_come_from_fifty_result_requests(self, api):
         async def script(app, pilot):
             await until(pilot, lambda: app.skills)
-            await until(pilot, lambda: len(api.calls) == 2)  # the prefetch
+            await pilot.pause(0.2)
+            # One request of 50 covers pages 1 and 2, so nothing to prefetch.
+            assert [c["limit"] for c in api.calls] == ["50"]
             await pilot.press("right")
             assert app.search.page == 2
             assert names(app)[0] == "skill-20"
-            assert len(api.calls) == 3  # page 3's prefetch, not page 2
+            # Page 3 needs results 41-60, so now the second request goes out.
+            await until(pilot, lambda: len(api.calls) == 2)
+            assert api.calls[1]["page"] == "2"
+            await pilot.press("right")
+            assert names(app)[0] == "skill-40"
+            assert app.loading_search is None
+            await pilot.press("left")
             await pilot.press("left")
             assert names(app)[0] == "native-0"
+            assert len(api.calls) == 2
+
+        run_app(Search("q"), script)
+
+    def test_prefetch_stops_when_quota_runs_low(self, api):
+        api.remaining = tui.PREFETCH_MIN_REMAINING + 1
+
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await pilot.press("right")
+            await pilot.pause(0.3)
+            assert len(api.calls) == 1
+            assert app.client.quota == (tui.PREFETCH_MIN_REMAINING, 50, "today")
+            assert "10/50 searches left today" in str(app.status.render())
+
+        run_app(Search("q"), script)
+
+    def test_exhausted_quota_explains_reset(self, api):
+        api.remaining = 0
+
+        async def script(app, pilot):
+            await until(pilot, lambda: app.loading_search is None)
+            status = str(app.status.render())
+            assert "quota used up" in status and "resets in 23h 6m" in status
+            assert app.status.has_class("error")
+            assert app.client.exhausted
+
+        run_app(Search("q"), script)
+
+    def test_typing_exclusions_refilters_without_requests(self, api):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            app.box.focus()
+            await pilot.press("end")
+            for key in ("space", "minus", "n", "a", "t"):
+                await pilot.press(key)
+            await until(pilot, lambda: app.search.exclude == ("nat",))
+            assert app.loading_search is None  # served from the cache
+            assert all("native" not in n for n in names(app))
+            # Any further request is the background prefetch for page 2.
+            assert [c["page"] for c in api.calls[1:]] in ([], ["2"])
+
+        run_app(Search("q"), script)
+
+    def test_typing_a_new_query_waits_for_enter(self, api):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            app.box.focus()
+            for key in ("r", "e", "a", "c", "t"):
+                await pilot.press(key)
+            await pilot.pause(tui.SEARCH_DEBOUNCE + 0.2)
+            assert len(api.calls) == 1
+            assert "Press Enter" in str(app.status.render())
+            await pilot.press("enter")
+            await until(pilot, lambda: app.search.query == "react" and app.loading_search is None)
+            assert len(api.calls) == 2
 
         run_app(Search("q"), script)
 
@@ -204,7 +280,7 @@ class TestApp:
             await until(pilot, lambda: app.skills)
             await pilot.press("s")
             await until(pilot, lambda: app.search.sort == "recent" and app.loading_search is None)
-            assert names(app)[0] == "skill-44"
+            assert names(app)[0] == "skill-119"
 
         run_app(Search("q"), script)
 
@@ -241,7 +317,7 @@ class TestApp:
 
         async def script(app, pilot):
             await until(pilot, lambda: app.loading_search is None)
-            assert "slow down" in str(app.status.render())
+            assert "broken" in str(app.status.render())
             assert app.status.has_class("error")
 
         run_app(Search("q"), script)

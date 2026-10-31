@@ -74,7 +74,9 @@ skillsmp -i react
 skillsmp -i --sort recent --language en
 ```
 
-Move with the arrow keys or `j`/`k`, and change pages with `←`/`→` (or `[`/`]`). The next page is fetched in the background, so paging forward is usually instant. `/` jumps to the search box, which re-runs as you type. A word starting with `-` in the box works like `--exclude`, so `react -native` hides anything mentioning native. `x` hides every skill with the highlighted skill's name and `X` hides its author; both add a term to the search box, so deleting it there brings them back. `s` switches between stars and recent, Enter opens SKILL.md full screen, `o` opens the skill on GitHub, `w` opens its SkillsMP page, `y` copies its GitHub URL, and `q` quits.
+Move with the arrow keys or `j`/`k`, and change pages with `←`/`→` (or `[`/`]`). `/` jumps to the search box and Enter runs the search. A word starting with `-` in the box works like `--exclude`, so `react -native` hides anything mentioning native, and exclusions apply as you type. `x` hides every skill with the highlighted skill's name and `X` hides its author; both add a term to the search box, so deleting it there brings them back. `s` switches between stars and recent, Enter opens SKILL.md full screen, `o` opens the skill on GitHub, `w` opens its SkillsMP page, `y` copies its GitHub URL, and `q` quits.
+
+Searches are metered. Anonymous use and the Free plan both get 50 a day, reset at midnight UTC, so the TUI is careful with them. It fetches 50 results per request and builds pages from those, so one search covers the first two and a half pages, and adding or removing exclusions doesn't make a new request. It only fetches the next page ahead of time while more than 10 searches are left, and the status line shows how many remain.
 
 ## Skill details
 

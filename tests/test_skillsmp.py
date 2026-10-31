@@ -870,6 +870,14 @@ class TestQuotaErrors:
         assert_exit_code(exc, 1)
         assert "resets in 23h 6m" in capsys.readouterr().err
 
+    def test_headers_reported_on_success_and_error(self):
+        response = make_response({"data": {}})
+        response.headers.items.return_value = [("X-RateLimit-Daily-Remaining", "7")]
+        seen = []
+        with mock.patch("skillsmp.urllib.request.urlopen", return_value=response):
+            skillsmp._fetch(urllib.request.Request("http://x"), on_headers=seen.append)
+        assert seen == [{"X-RateLimit-Daily-Remaining": "7"}]
+
 
 class TestExclude:
     @staticmethod

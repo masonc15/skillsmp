@@ -197,16 +197,27 @@ def _format_wait(seconds: int) -> str:
 
 
 def _fetch(
-    req: urllib.request.Request, *, on_retry: Callable[[str], None] | None = None
+    req: urllib.request.Request,
+    *,
+    on_retry: Callable[[str], None] | None = None,
+    on_headers: Callable[[dict], None] | None = None,
 ) -> bytes:
-    """GET/POST with retries; raise FetchError once they run out."""
+    """GET/POST with retries; raise FetchError once they run out.
+
+    `on_headers` gets each response's headers, error responses included, so
+    callers can track the X-RateLimit-* quota.
+    """
     last_exc: Exception | None = None
     for attempt in range(RETRY_MAX_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                if on_headers:
+                    on_headers(dict(resp.headers.items()))
                 return resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
             last_exc = e
+            if on_headers and isinstance(e, urllib.error.HTTPError) and e.headers:
+                on_headers(dict(e.headers.items()))
             is_last = attempt == RETRY_MAX_ATTEMPTS - 1
             if not is_last and _is_retryable(e):
                 retries_left = RETRY_MAX_ATTEMPTS - attempt - 1
@@ -438,13 +449,17 @@ def _search(
     limit: int,
     page: int,
     request_json: Callable[[dict], dict],
+    stream: bool = False,
+    max_api_pages: int = EXCLUDE_MAX_REQUESTS,
 ) -> tuple[list[dict], dict, int]:
     """Run one search page through `request_json` (search params -> response).
 
-    Returns (skills, pagination, excluded_count). With exclusions, pages count
-    kept results, so page 2 starts where page 1 ended.
+    Returns (skills, pagination, excluded_count). With exclusions, or with
+    `stream`, the API is read in pages of MAX_LIMIT and display pages are cut
+    from what's kept, so page 2 starts where page 1 ended. `max_api_pages`
+    caps how far into the API's pages that reading goes.
     """
-    if not exclude:
+    if not exclude and not stream:
         data = request_json({**params, "limit": limit, "page": page}).get("data", {})
         return data.get("skills", []), data.get("pagination", {}), 0
 
@@ -456,7 +471,7 @@ def _search(
     while (
         len(kept) <= page * limit
         and api_has_next
-        and api_page <= EXCLUDE_MAX_REQUESTS
+        and api_page <= max_api_pages
     ):
         data = request_json({**params, "limit": MAX_LIMIT, "page": api_page}).get("data", {})
         for s in data.get("skills", []):
