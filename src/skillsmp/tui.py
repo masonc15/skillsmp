@@ -718,6 +718,8 @@ class SkillsmpApp(App):
 
     @on(OptionList.OptionHighlighted, "#results")
     def highlighted(self) -> None:
+        if not self.screen_stack:
+            return  # The app is closing.
         self.show_detail(self.current())
         self.refresh_bindings()
 
