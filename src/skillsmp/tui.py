@@ -7,9 +7,11 @@ import shlex
 import shutil
 import subprocess
 import threading
+import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from textual import on, work
@@ -299,6 +301,40 @@ def _age(ts, now: datetime | None = None) -> str:
     return f"{days // 365}y"
 
 
+def _link(url: str) -> Style:
+    """Clickable in the TUI, plus an OSC 8 hyperlink for the terminal.
+
+    Terminals hand clicks to apps that track the mouse (Cmd+click arrives as
+    a plain click in Ghostty), so the app opens the link itself. Cmd+Shift+
+    click goes to the terminal instead, which opens the OSC 8 link.
+    """
+    return Style(underline=True, link=url) + Style.from_meta({"@click": f"app.open_link({url!r})"})
+
+
+def _skill_base_url(d: dict) -> str | None:
+    """Where a skill's folder is on the web, ending in a slash, if known."""
+    repo = d.get("repo") or ""
+    if d["registry"] == "skills.sh" and repo.count("/") == 1:
+        found, folder = core._skill_paths.get(d["id"])
+        if not found or not isinstance(folder, str):
+            return None
+        return f"https://github.com/{repo}/blob/HEAD/" + (f"{folder}/" if folder else "")
+    if d["registry"] == "skills.sh":
+        return f"https://{repo}/.well-known/skills/{urllib.parse.quote(d['name'])}/"
+    url = d["githubUrl"].rstrip("/")
+    if "/tree/" in url:
+        return url.replace("/tree/", "/blob/", 1) + "/"
+    return f"{url}/blob/HEAD/" if url else None
+
+
+def resolve_href(d: dict, href: str) -> str | None:
+    """A SKILL.md link as a full URL; relative ones point into the skill's folder."""
+    if urllib.parse.urlsplit(href).scheme:
+        return href
+    base = _skill_base_url(d)
+    return urllib.parse.urljoin(base, href) if base else None
+
+
 def _detail_text(d: dict, description: str = "", dates_pending: bool = False) -> Text:
     t = Text()
     t.append(d["id"].rpartition("/")[0] + "/", style="dim")
@@ -336,7 +372,11 @@ def _detail_text(d: dict, description: str = "", dates_pending: bool = False) ->
     for label, value in rows:
         if value:
             t.append(f"{label} ", style="dim")
-            t.append(value, style="bold" if label == "install" else "underline")
+            if label == "install":
+                style = Style(bold=True) + Style.from_meta({"@click": f"app.copy({value!r})"})
+            else:
+                style = _link(value)
+            t.append(value, style=style)
             t.append("\n")
     return t
 
@@ -401,13 +441,18 @@ class SkillScreen(Screen):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="reader"):
             yield Static(_detail_text(self.skill, self.description), id="reader-meta")
-            yield Markdown(self.markdown)
+            yield Markdown(self.markdown, open_links=False)
         yield Footer()
 
     def on_mount(self) -> None:
         reader = self.query_one("#reader")
         reader.border_title = self.skill["id"]
         reader.focus()
+
+    @on(Markdown.LinkClicked)
+    def link_clicked(self, event: Markdown.LinkClicked) -> None:
+        event.stop()
+        follow_link(self.app, event, self.skill)
 
     def action_scroll(self, direction: str) -> None:
         reader = self.query_one("#reader", VerticalScroll)
@@ -421,6 +466,18 @@ class SkillScreen(Screen):
 
     def action_copy_install(self) -> None:
         copy_text(self.app, self.skill["installCommand"])
+
+
+def follow_link(app: App, event: Markdown.LinkClicked, d: dict | None) -> None:
+    href = event.href
+    if href.startswith("#"):
+        event.markdown.goto_anchor(href[1:])
+        return
+    url = resolve_href(d, href) if d else None
+    if url:
+        app.open_url(url)
+    else:
+        app.notify(f"Couldn't tell where {href} is; the skill's folder isn't known yet.")
 
 
 def open_skill_url(app: App, d: dict, field: str) -> None:
@@ -514,7 +571,7 @@ class SkillsmpApp(App):
             yield Results(id="results")
             with VerticalScroll(id="detail"):
                 yield Static(id="meta")
-                yield Markdown(id="skillmd")
+                yield Markdown(id="skillmd", open_links=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -777,6 +834,10 @@ class SkillsmpApp(App):
             self._shown_skill_md = key
             self.skill_md_view.update(body)
 
+    @on(Markdown.LinkClicked, "#skillmd")
+    def skill_md_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        follow_link(self, event, self.current())
+
     @on(OptionList.OptionSelected, "#results")
     def selected(self) -> None:
         d = self.current()
@@ -859,6 +920,15 @@ class SkillsmpApp(App):
         d = self.current()
         if d:
             copy_text(self, d["installCommand"])
+
+    # Click targets in the detail pane and the reader; they carry their own
+    # values, so unlike the keys above they also work while the reader is up.
+
+    def action_open_link(self, url: str) -> None:
+        self.open_url(url)
+
+    def action_copy(self, text: str) -> None:
+        copy_text(self, text)
 
     def _notify_retry(self, message: str) -> None:
         self.call_from_thread(self.notify, message, severity="warning")

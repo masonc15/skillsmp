@@ -562,6 +562,113 @@ class TestCommitDates:
         assert tui._age(ts, now) == expected
 
 
+def locate(widget, needle: str) -> tuple[int, int] | None:
+    """The (x, y) of `needle` in a widget's rendered lines."""
+    for y in range(widget.size.height):
+        line = "".join(seg.text for seg in widget.render_line(y))
+        if needle in line:
+            return line.index(needle), y
+    return None
+
+
+async def find_text(pilot, widget, needle: str) -> tuple[int, int]:
+    await until(pilot, lambda: locate(widget, needle) is not None)
+    return locate(widget, needle)
+
+
+class TestLinks:
+    def test_clicking_urls_in_detail_pane(self, api):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            url = SKILLS[0]["githubUrl"]
+            x, y = await find_text(pilot, app.meta, url)
+            with mock.patch.object(app, "open_url") as open_url:
+                await pilot.click(app.meta, offset=(x + 3, y))
+                await pilot.pause()
+            open_url.assert_called_once_with(url)
+
+        run_app(MP("q"), script)
+
+    def test_urls_carry_osc8_links(self, api):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            x, y = await find_text(pilot, app.meta, SKILLS[0]["skillUrl"])
+            links = {seg.style.link for seg in app.meta.render_line(y) if seg.style and seg.style.link}
+            assert links == {SKILLS[0]["skillUrl"]}
+
+        run_app(MP("q"), script)
+
+    def test_clicking_install_copies_it(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await find_text(pilot, app.meta, "About skill-0")  # SKILL.md is in
+            command = "npx skills add acme/pack --skill skill-0"
+            x, y = await find_text(pilot, app.meta, command)
+            with mock.patch.object(tui.shutil, "which", return_value=None):
+                await pilot.click(app.meta, offset=(x + 5, y))
+                await pilot.pause()
+            assert app.clipboard == command
+
+        run_app(Search("deploy"), script)
+
+    def test_clicking_urls_in_reader(self, api):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            d = app.current()
+            await until(pilot, lambda: app.client.skill_md_cached(d)[0])
+            await pilot.press("enter")
+            meta = app.screen.query_one("#reader-meta")
+            x, y = await find_text(pilot, meta, d["githubUrl"])
+            with mock.patch.object(app, "open_url") as open_url:
+                await pilot.click(meta, offset=(x + 3, y))
+                await pilot.pause()
+            open_url.assert_called_once_with(d["githubUrl"])
+
+        run_app(MP("q"), script)
+
+    def test_relative_skill_md_links_open_on_github(self, both, monkeypatch):
+        monkeypatch.setattr(skillsmp, "_github_token", lambda: "t")
+
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await until(pilot, lambda: app.current()["updatedAt"])  # folder found
+            md = app.skill_md_view
+            with mock.patch.object(app, "open_url") as open_url:
+                md.post_message(md.LinkClicked(md, "references/api.md"))
+                await pilot.pause()
+            open_url.assert_called_once_with(
+                "https://github.com/acme/pack/blob/HEAD/skills/skill-0/references/api.md"
+            )
+
+        run_app(Search("deploy"), script)
+
+
+class TestResolveHref:
+    def skill(self, **kw):
+        base = {"registry": "skills.sh", "repo": "acme/pack", "id": "acme/pack/x", "name": "x", "githubUrl": ""}
+        return base | kw
+
+    def test_absolute_kept(self):
+        assert tui.resolve_href(self.skill(), "https://x.dev/a") == "https://x.dev/a"
+
+    def test_relative_to_cached_folder(self, monkeypatch):
+        skillsmp._skill_paths.update({"acme/pack/x": "skills/x", "acme/pack/root": ""})
+        assert tui.resolve_href(self.skill(), "../y/SKILL.md") == "https://github.com/acme/pack/blob/HEAD/skills/y/SKILL.md"
+        root = self.skill(id="acme/pack/root")
+        assert tui.resolve_href(root, "docs/a.md") == "https://github.com/acme/pack/blob/HEAD/docs/a.md"
+
+    def test_unknown_folder(self):
+        assert tui.resolve_href(self.skill(), "a.md") is None
+
+    def test_site_hosted(self):
+        d = self.skill(repo="docs.stripe.com", id="docs.stripe.com/x")
+        assert tui.resolve_href(d, "ref.md") == "https://docs.stripe.com/.well-known/skills/x/ref.md"
+
+    def test_skillsmp_tree_url(self):
+        d = self.skill(registry="skillsmp", githubUrl="https://github.com/a/b/tree/main/skills/x")
+        assert tui.resolve_href(d, "./ref.md") == "https://github.com/a/b/blob/main/skills/x/ref.md"
+
+
 class TestInteractiveFlag:
     @pytest.fixture
     def tty(self, monkeypatch):
