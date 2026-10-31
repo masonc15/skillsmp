@@ -183,6 +183,17 @@ class FetchError(Exception):
     def __init__(self, message: str, payload: dict) -> None:
         super().__init__(message)
         self.payload = payload
+        # The API's error code, e.g. DAILY_QUOTA_EXCEEDED.
+        self.code: str | None = payload.get("errorCode")
+
+
+QUOTA_ERROR_CODES = {"DAILY_QUOTA_EXCEEDED", "MONTHLY_QUOTA_EXCEEDED"}
+
+
+def _format_wait(seconds: int) -> str:
+    hours, rem = divmod(max(seconds, 0), 3600)
+    minutes = -(-rem // 60) if hours == 0 else rem // 60
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
 
 def _fetch(
@@ -215,10 +226,26 @@ def _fetch(
             body = json.loads(last_exc.read())
         except Exception:
             pass
-        msg = body.get("error", {}).get("message", last_exc.reason)
-        raise FetchError(
-            f"API error ({last_exc.code}): {msg}", {"error": msg, "code": last_exc.code}
-        )
+        error = body.get("error", {})
+        if not isinstance(error, dict):
+            error = {}
+        msg = error.get("message", last_exc.reason)
+        payload = {"error": msg, "code": last_exc.code}
+        human = f"API error ({last_exc.code}): {msg}"
+        if error.get("code"):
+            payload["errorCode"] = error["code"]
+        if error.get("resetAt"):
+            payload["resetAt"] = error["resetAt"]
+        if isinstance(error.get("retryAfter"), int):
+            payload["retryAfter"] = error["retryAfter"]
+            if error.get("code") in QUOTA_ERROR_CODES:
+                human = (
+                    f"SkillsMP search quota used up ({msg.rstrip('.')}); "
+                    f"it resets in {_format_wait(error['retryAfter'])}"
+                )
+            else:
+                human += f" Try again in {_format_wait(error['retryAfter'])}."
+        raise FetchError(human, payload)
     raise FetchError(
         f"network error: {last_exc.reason}", {"error": str(last_exc.reason)}
     )

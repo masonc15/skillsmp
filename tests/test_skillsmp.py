@@ -6,6 +6,7 @@ import json
 import sys
 import textwrap
 import urllib.error
+import urllib.request
 from unittest import mock
 
 import pytest
@@ -833,6 +834,41 @@ class TestSearchFilters:
         url = patched.call_args.args[0].full_url
         assert "category=devops" in url
         assert "language=en" in url
+
+
+class TestQuotaErrors:
+    def quota_error(self, code="DAILY_QUOTA_EXCEEDED", retry_after=83167):
+        body = json.dumps({"success": False, "error": {
+            "code": code, "message": "API request allowance exhausted.",
+            "resetAt": "2026-11-01T00:00:00.000Z", "retryAfter": retry_after,
+        }}).encode()
+        return make_http_error(429, "Too Many Requests", body)
+
+    def test_quota_exhaustion_says_when_it_resets(self):
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=self.quota_error()):
+            with pytest.raises(skillsmp.FetchError) as exc:
+                skillsmp._fetch(urllib.request.Request("http://x"))
+        assert str(exc.value) == (
+            "SkillsMP search quota used up (API request allowance exhausted); "
+            "it resets in 23h 6m"
+        )
+        assert exc.value.code == "DAILY_QUOTA_EXCEEDED"
+        assert exc.value.payload["resetAt"] == "2026-11-01T00:00:00.000Z"
+
+    def test_minute_limit_says_how_long_to_wait(self):
+        err = self.quota_error(code="RATE_LIMITED", retry_after=40)
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=err) as patched:
+            with pytest.raises(skillsmp.FetchError) as exc:
+                skillsmp._fetch(urllib.request.Request("http://x"))
+        assert str(exc.value).endswith("Try again in 1m.")
+        assert patched.call_count == 1  # 429s are not retried
+
+    def test_cli_reports_quota_error(self, capsys):
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=self.quota_error()):
+            with pytest.raises(SystemExit) as exc:
+                skillsmp._cmd_search("q")
+        assert_exit_code(exc, 1)
+        assert "resets in 23h 6m" in capsys.readouterr().err
 
 
 class TestExclude:
