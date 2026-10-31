@@ -52,7 +52,9 @@ class TestArgumentParsing:
         parsed = parse_args(["q"])
         assert parsed["limit"] == 10
         assert parsed["page"] == 1
-        assert parsed["sort"] == "stars"
+        assert parsed["sort"] == "relevance"
+        assert parsed["source"] == "skills.sh"
+        assert parsed["fallback"] is True
         assert parsed["json"] is False
         assert parsed["plain"] is False
         assert parsed["category"] is None
@@ -208,7 +210,7 @@ class TestErrorMessages:
             (["--bogus", "q"], "unknown flag: --bogus"),
             (["--json", "--plain", "q"], "mutually exclusive"),
             (["--limit", "200", "q"], "1-50"),
-            (["--sort", "name", "q"], "'stars' or 'recent'"),
+            (["--sort", "name", "q"], "relevance, installs, stars, recent"),
             (["--ai", "q"], "retired"),
             (["show", "acme/x", "--limit", "5"], "do not apply"),
         ],
@@ -227,7 +229,7 @@ class TestKeywordOutput:
         with mock_urlopen(make_keyword_response(total=1)):
             skillsmp._cmd_search("terraform")
         out = capsys.readouterr().out
-        assert "Keyword search:" in out
+        assert "SkillsMP search:" in out
         assert "acme/terraform-deploy" in out
         assert "42 stars" in out
 
@@ -269,9 +271,9 @@ class TestKeywordOutput:
         with mock_urlopen(make_keyword_response(skills=skills, total=2)):
             skillsmp._cmd_search("terraform", output_plain=True)
         lines = capsys.readouterr().out.splitlines()
-        assert lines[0].split("\t")[-1] == "zh"
-        assert lines[1].split("\t")[-1] == ""
-        assert len(lines[1].split("\t")) == 5
+        assert lines[0].split("\t")[-2:] == ["zh", "skillsmp"]
+        assert lines[1].split("\t")[-2:] == ["", "skillsmp"]
+        assert len(lines[1].split("\t")) == 6
 
     def test_json_output_includes_language(
         self, capsys, mock_urlopen, make_keyword_response, make_skill
@@ -510,9 +512,10 @@ class TestEnvironmentAndConfig:
 
 class TestMainIntegration:
     def test_keyword_search_path(self, capsys, mock_urlopen, make_keyword_response):
-        with mock_urlopen(make_keyword_response()), mock.patch("sys.argv", ["skillsmp", "terraform"]):
+        argv = ["skillsmp", "--source", "skillsmp", "terraform"]
+        with mock_urlopen(make_keyword_response()), mock.patch("sys.argv", argv):
             skillsmp.main()
-        assert "Keyword search:" in capsys.readouterr().out
+        assert "SkillsMP search:" in capsys.readouterr().out
 
     def test_json_mode_path(self, capsys, mock_urlopen, make_keyword_response):
         with mock_urlopen(make_keyword_response()), mock.patch(
@@ -760,7 +763,7 @@ class TestShowCommand:
         with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses):
             skillsmp._cmd_show("acme/terraform-deploy")
         captured = capsys.readouterr()
-        assert "skillsmp: https://skillsmp.com/en" in captured.out
+        assert "skillsmp:  https://skillsmp.com/en" in captured.out
         assert "https://skillsmp.com/es  (es)" in captured.err
 
     def test_json_lists_other_matches(self, capsys, make_skill, make_keyword_response):
@@ -993,7 +996,9 @@ class TestSubcommandIntegration:
         ]
         with mock.patch(
             "skillsmp.urllib.request.urlopen", side_effect=responses
-        ), mock.patch("sys.argv", ["skillsmp", "show", "acme/terraform-deploy"]):
+        ), mock.patch(
+            "sys.argv", ["skillsmp", "show", "--source", "skillsmp", "acme/terraform-deploy"]
+        ):
             skillsmp.main()
         assert "acme/terraform-deploy" in capsys.readouterr().out
 

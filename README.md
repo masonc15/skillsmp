@@ -1,6 +1,6 @@
 # skillsmp
 
-Search the [SkillsMP marketplace](https://skillsmp.com) for agent skills from the command line.
+Search for agent skills from the command line. It searches [skills.sh](https://skills.sh), the directory behind `npx skills`, and falls back to the [SkillsMP marketplace](https://skillsmp.com) when skills.sh has nothing.
 
 ## Install
 
@@ -16,36 +16,42 @@ Or run without installing:
 uvx skillsmp terraform
 ```
 
-It works without an API key, but anonymous use is capped at 50 searches a day and 10 a minute. A free key from [skillsmp.com/developers](https://skillsmp.com/developers) raises that to 500 a day and 30 a minute. Set it in `~/.env` or export it directly:
+skills.sh needs no key and isn't metered. SkillsMP works without an API key too, but anonymous use is capped at 50 searches a day and 10 a minute. A free key from [skillsmp.com/developers](https://skillsmp.com/developers) raises that to 500 a day and 30 a minute. Set it in `~/.env` or export it directly:
 
 ```
 SKILLSMP_API_KEY=your-key-here
 ```
 
+The key is only ever sent to SkillsMP.
+
 ## Usage
 
 ```
 skillsmp terraform
-skillsmp --limit 5 --sort recent react testing
-skillsmp show wshobson/terraform-module-library
+skillsmp --sort installs react testing
+skillsmp show hashicorp/agent-skills/terraform-test
 ```
 
-Results often include translations of the same skill, so anything not in English is tagged with its language code, like `affaan-m/python-patterns (es)`. Use `--json` for structured output or `--plain` for tab-separated lines (name, stars, description, GitHub URL, language) that pipe to `grep` and `awk`:
+Each skills.sh result comes with its install count and the `npx skills add` command that installs it. Use `--json` for structured output or `--plain` for tab-separated lines (ID, installs or stars, description, GitHub URL, language, source) that pipe to `grep` and `awk`:
 
 ```
 skillsmp --json deployment
 skillsmp --plain react | grep facebook
 ```
 
-## How search works
+## Sources
 
-Search matches your query against skill names and descriptions, sorted by stars (or by `--sort recent`). It's fast (~300ms) and supports pagination, but ranks by popularity rather than relevance, so a specific query beats a vague one.
+skills.sh is the default. Its catalog comes from what people actually install with `npx skills`, so it's current and ranked by relevance (or by install count with `--sort installs`). Multi-word queries get a semantic search. It returns at most 200 results for a query, all in one request, and the CLI pages through them locally. It has no descriptions in search results, so `show` and the TUI read them from each skill's SKILL.md.
+
+SkillsMP is a bigger crawl of GitHub with stars, categories and per-language filtering. The CLI uses it when skills.sh returns no results or fails, when the query is a single character (skills.sh needs two), or when you ask for something only SkillsMP has: `--category`, `--occupation`, `--language`, or `--sort stars`/`recent`. Results that came from SkillsMP say so in the header (and in `source` in JSON, with a `fallbackReason`).
+
+`--source skills.sh` or `--source skillsmp` picks one and turns off the fallback.
 
 SkillsMP used to offer an AI semantic search, and older versions of this tool exposed it as `--ai`. SkillsMP retired it in 2026, so `--ai` now exits with an error.
 
 ## Filtering
 
-Search accepts `--category` and `--occupation` to narrow results by SkillsMP's taxonomy, and `--language` to keep only skills written in one language (an ISO code like `en`, `zh` or `ja`; `mul` means mixed and `und` undetermined):
+SkillsMP search accepts `--category` and `--occupation` to narrow results by SkillsMP's taxonomy, and `--language` to keep only skills written in one language (an ISO code like `en`, `zh` or `ja`; `mul` means mixed and `und` undetermined):
 
 ```
 skillsmp --category cicd deployment
@@ -59,7 +65,7 @@ skillsmp categories
 skillsmp occupations | grep engineer
 ```
 
-`-x`/`--exclude` drops results whose `author/name` or description contains a term (case-insensitive). Repeat it to exclude several things. The API has no exclusion of its own, so the CLI fetches extra pages to fill `--limit` and counts `--page` over what's left, giving up after 5 requests:
+`-x`/`--exclude` works on both sources. It drops results whose ID (`owner/repo/skill` on skills.sh, `author/name` on SkillsMP) or description contains a term (case-insensitive). Repeat it to exclude several things. Neither API has exclusion of its own, so on SkillsMP the CLI fetches extra pages to fill `--limit` and counts `--page` over what's left, giving up after 5 requests:
 
 ```
 skillsmp -x native -x affaan-m react
@@ -93,7 +99,9 @@ skillsmp show --json wshobson/terraform-module-library
 -i, --interactive   Browse results in a full-screen TUI
 -n, --limit N       Results per page (1-50, default: 10, or 20 with -i)
 -p, --page N        Page number (default: 1)
--s, --sort KEY      Sort by: stars, recent (default: stars)
+-s, --sort KEY      skills.sh: relevance (default), installs
+                    SkillsMP: stars (default), recent
+    --source S      skills.sh or skillsmp (default: skills.sh with fallback)
     --category C    Filter by category slug
     --occupation O  Filter by occupation slug
     --language L    Filter by content language code

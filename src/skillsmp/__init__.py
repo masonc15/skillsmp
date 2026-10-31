@@ -1,4 +1,4 @@
-"""Search the SkillsMP marketplace for agent skills."""
+"""Search skills.sh and the SkillsMP marketplace for agent skills."""
 
 from __future__ import annotations
 
@@ -32,6 +32,13 @@ MAX_LIMIT = 50
 # page of results. Cap the requests so a broad exclusion can't loop for long.
 EXCLUDE_MAX_REQUESTS = 5
 DESC_DISPLAY_LIMIT = 200
+SKILLSSH_URL = "https://skills.sh"
+# skills.sh search returns at most this many hits and has no paging.
+SKILLSSH_MAX_RESULTS = 200
+SOURCES = ("skills.sh", "skillsmp")
+SOURCE_LABELS = {"skills.sh": "skills.sh", "skillsmp": "SkillsMP"}
+SORTS = {"skills.sh": ("relevance", "installs"), "skillsmp": ("stars", "recent")}
+DEFAULT_SORT = {source: sorts[0] for source, sorts in SORTS.items()}
 DESC_PLAIN_LIMIT = 120
 
 # --- TTY / formatting helpers ---
@@ -61,7 +68,7 @@ def _concise_help(color: bool) -> str:
         return _style(t, "36", color)
 
     return f"""\
-{bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+{bold("skillsmp")} — search skills.sh and SkillsMP for agent skills
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
@@ -82,12 +89,12 @@ def _full_help(color: bool) -> str:
         return _style(t, "2", color)
 
     return f"""\
-{bold("skillsmp")} — search the SkillsMP marketplace for agent skills
+{bold("skillsmp")} — search skills.sh and SkillsMP for agent skills
 
 {bold("Usage:")}
   {lit("skillsmp")} {dim("[flags] <query ...>")}
   {lit("skillsmp -i")} {dim("[flags] [query ...]")}
-  {lit("skillsmp show")} {dim("<author>/<skill-name>")}
+  {lit("skillsmp show")} {dim("<owner>/<repo>/<skill> | <author>/<skill>")}
   {lit("skillsmp categories")}
   {lit("skillsmp occupations")}
 
@@ -100,7 +107,10 @@ def _full_help(color: bool) -> str:
   {lit("-i, --interactive")}   Browse results in a full-screen TUI
   {lit("-n, --limit")} {dim("N")}       Results per page (1-50, default: 10, or 20 with -i)
   {lit("-p, --page")} {dim("N")}        Page number (default: 1)
-  {lit("-s, --sort")} {dim("KEY")}      Sort order: stars, recent (default: stars)
+  {lit("-s, --sort")} {dim("KEY")}      skills.sh: relevance (default), installs
+                      SkillsMP: stars (default), recent
+      {lit("--source")} {dim("S")}      skills.sh or skillsmp (default: skills.sh, falling
+                      back to SkillsMP when it has no results or fails)
       {lit("--category")} {dim("C")}    Filter by category slug (see: skillsmp categories)
       {lit("--occupation")} {dim("O")}  Filter by occupation slug (see: skillsmp occupations)
       {lit("--language")} {dim("L")}    Filter by content language code (en, zh, ja, ...)
@@ -112,19 +122,22 @@ def _full_help(color: bool) -> str:
       {lit("--version")}       Show version
 
   {dim("--limit, --page, --sort, --exclude, and the filters apply to search only.")}
+  {dim("The filters and the stars/recent sorts are SkillsMP's, so they search it directly.")}
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
   {lit("skillsmp -i react")}
-  {lit("skillsmp --limit 5 --sort recent react testing")}
+  {lit("skillsmp --sort installs react testing")}
   {lit("skillsmp --category cicd --json deployment")}
   {lit("skillsmp --occupation lawyers --language en contracts")}
   {lit("skillsmp -x native -x affaan-m react")}
-  {lit("skillsmp show wshobson/terraform-module-library")}
+  {lit("skillsmp show hashicorp/agent-skills/terraform-test")}
+  {lit("skillsmp show --source skillsmp wshobson/terraform-module-library")}
   {lit("skillsmp --plain react | grep facebook")}
 
 {bold("Environment:")}
-  {lit("SKILLSMP_API_KEY")}    API key (optional, raises rate limits). Read from env or ~/.env.
+  {lit("SKILLSMP_API_KEY")}    SkillsMP API key (optional, raises its daily search quota).
+                      Read from env or ~/.env. Never sent to skills.sh.
 
 Docs: https://github.com/masonc15/skillsmp
 """
@@ -238,7 +251,9 @@ def _fetch(
         except Exception:
             pass
         error = body.get("error", {})
-        if not isinstance(error, dict):
+        if isinstance(error, str):
+            error = {"message": body.get("message") or error}
+        elif not isinstance(error, dict):
             error = {}
         msg = error.get("message", last_exc.reason)
         payload = {"error": msg, "code": last_exc.code}
@@ -289,6 +304,19 @@ def _api_url_request(endpoint: str, params: dict) -> urllib.request.Request:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return urllib.request.Request(f"{BASE_URL}/{endpoint}?{qs}", headers=headers)
+
+
+def _skillssh_request(path: str, params: dict | None = None) -> urllib.request.Request:
+    qs = "?" + urllib.parse.urlencode(params) if params else ""
+    return urllib.request.Request(
+        f"{SKILLSSH_URL}{path}{qs}", headers={"User-Agent": f"skillsmp-cli/{__version__}"}
+    )
+
+
+def _search_request(source: str, params: dict) -> urllib.request.Request:
+    if source == "skills.sh":
+        return _skillssh_request("/api/search", params)
+    return _api_url_request("search", params)
 
 
 def _api_request(
@@ -366,22 +394,88 @@ def _format_stars(n: int | None) -> str:
     return str(n)
 
 
-def _normalize_skill(skill: dict) -> dict:
+def _from_skillssh(item: dict) -> dict:
+    """Reshape a skills.sh search hit to look like a SkillsMP one."""
+    repo = item.get("source", "")
+    slug = item.get("skillId") or item.get("name") or "unknown"
+    skill_id = item.get("id") or f"{repo}/{slug}"
     return {
+        "name": slug,
+        "author": repo.split("/")[0] or "unknown",
+        "description": item.get("description", ""),
+        "installs": item.get("installs"),
+        # Sources without a slash are well-known sites like docs.stripe.com.
+        "githubUrl": f"https://github.com/{repo}" if repo.count("/") == 1 else "",
+        "skillUrl": f"{SKILLSSH_URL}/{skill_id}",
+        "registry": "skills.sh",
+        "id": skill_id,
+        "repo": repo,
+    }
+
+
+def _install_command(d: dict) -> str:
+    if d["registry"] == "skills.sh":
+        repo = d["repo"] or ""
+        target = repo if repo.count("/") == 1 else f"https://{repo}"
+        return f"npx skills add {target} --skill {d['name']}"
+    if d["githubUrl"]:
+        return f"npx skills add {d['githubUrl']}"
+    return ""
+
+
+def _normalize_skill(skill: dict) -> dict:
+    registry = skill.get("registry", "skillsmp")
+    d = {
         "name": skill.get("name", "unknown"),
         "author": skill.get("author", "unknown"),
         "description": skill.get("description", ""),
-        "stars": skill.get("stars", 0),
+        "stars": skill.get("stars", 0 if registry == "skillsmp" else None),
+        "installs": skill.get("installs"),
         "updatedAt": skill.get("updatedAt"),
         "githubUrl": skill.get("githubUrl", ""),
         "skillUrl": skill.get("skillUrl", ""),
         "contentLanguage": skill.get("contentLanguage"),
+        "registry": registry,
+        "repo": skill.get("repo"),
     }
+    d["id"] = skill.get("id") or f"{d['author']}/{d['name']}"
+    d["installCommand"] = _install_command(d)
+    return d
+
+
+def _skill_stats(d: dict) -> str:
+    if d["registry"] == "skills.sh":
+        if d["installs"] is None:
+            return "installs unknown"
+        return f"{_format_stars(d['installs'])} installs"
+    return f"{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}"
+
+
+def _frontmatter_description(text: str) -> str:
+    """The description from SKILL.md's YAML frontmatter, if there is one."""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    lines = text[3:end if end != -1 else None].splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith("description:"):
+            continue
+        value = line[len("description:"):].strip()
+        if value in ("", ">", "|", ">-", "|-", ">+", "|+"):
+            # A block scalar: the indented lines that follow.
+            block = []
+            for nxt in lines[i + 1 :]:
+                if nxt and not nxt[0].isspace():
+                    break
+                block.append(nxt.strip())
+            value = " ".join(x for x in block if x)
+        return value.strip().strip("\"'")
+    return ""
 
 
 def _skill_label(d: dict) -> str:
-    """author/name, tagged with the content language unless it's English."""
-    label = f"{d['author']}/{d['name']}"
+    """The skill's ID, tagged with the content language unless it's English."""
+    label = d["id"]
     lang = d["contentLanguage"]
     if lang and lang != "en":
         label += f" ({lang})"
@@ -397,26 +491,27 @@ def _clip(text: str, limit: int) -> str:
 def _print_skill(skill: dict) -> None:
     d = _normalize_skill(skill)
 
-    header = f"  {_skill_label(d)}"
-    header += f"  [{_format_stars(d['stars'])} stars, updated {_format_timestamp(d['updatedAt'])}]"
-    print(header)
+    print(f"  {_skill_label(d)}  [{_skill_stats(d)}]")
     if d["description"]:
         print(f"    {_clip(d['description'], DESC_DISPLAY_LIMIT)}")
     if d["githubUrl"]:
         print(f"    github: {d['githubUrl']}")
     if d["skillUrl"]:
-        print(f"    skillsmp: {d['skillUrl']}")
+        print(f"    {d['registry']}: {d['skillUrl']}")
+    if d["registry"] == "skills.sh":
+        print(f"    install: {d['installCommand']}")
     print()
 
 
 def _print_skill_plain(skill: dict) -> None:
     d = _normalize_skill(skill)
     parts = [
-        f"{d['author']}/{d['name']}",
-        str(d["stars"]),
+        d["id"],
+        str(d["installs"] if d["registry"] == "skills.sh" else d["stars"]),
         _clip(d["description"], DESC_PLAIN_LIMIT),
         d["githubUrl"],
         d["contentLanguage"] or "",
+        d["registry"],
     ]
     print("\t".join(parts))
 
@@ -438,7 +533,7 @@ def _describe_pagination(pagination: dict) -> str:
 
 def _is_excluded(skill: dict, exclude: list[str]) -> bool:
     d = _normalize_skill(skill)
-    haystack = f"{d['author']}/{d['name']}\n{d['description']}".lower()
+    haystack = f"{d['id']}\n{d['author']}/{d['name']}\n{d['description']}".lower()
     return any(term.lower() in haystack for term in exclude)
 
 
@@ -451,6 +546,7 @@ def _search(
     request_json: Callable[[dict], dict],
     stream: bool = False,
     max_api_pages: int = EXCLUDE_MAX_REQUESTS,
+    source: str = "skillsmp",
 ) -> tuple[list[dict], dict, int]:
     """Run one search page through `request_json` (search params -> response).
 
@@ -458,7 +554,11 @@ def _search(
     `stream`, the API is read in pages of MAX_LIMIT and display pages are cut
     from what's kept, so page 2 starts where page 1 ended. `max_api_pages`
     caps how far into the API's pages that reading goes.
+
+    For skills.sh, `params` is {"q", "sort"}; for SkillsMP, the API's own.
     """
+    if source == "skills.sh":
+        return _search_skillssh(params, exclude, limit=limit, page=page, request_json=request_json)
     if not exclude and not stream:
         data = request_json({**params, "limit": limit, "page": page}).get("data", {})
         return data.get("skills", []), data.get("pagination", {}), 0
@@ -496,39 +596,118 @@ def _search(
     return kept[start : start + limit], pagination, excluded
 
 
-def _cmd_search(
-    query: str,
+def _search_skillssh(
+    params: dict,
+    exclude: list[str],
     *,
-    limit: int = 10,
-    page: int = 1,
-    sort: str = "stars",
+    limit: int,
+    page: int,
+    request_json: Callable[[dict], dict],
+) -> tuple[list[dict], dict, int]:
+    """One request returns every hit skills.sh has; pages are cut from it."""
+    query = params["q"]
+    if len(query.strip()) < 2:
+        hits: list[dict] = []  # skills.sh rejects one-character queries
+    else:
+        data = request_json({"q": query, "limit": SKILLSSH_MAX_RESULTS})
+        hits = [_from_skillssh(s) for s in data.get("skills", [])]
+    if params.get("sort") == "installs":
+        hits.sort(key=lambda s: s["installs"] or 0, reverse=True)
+    kept = [s for s in hits if not _is_excluded(s, exclude)]
+    start = (page - 1) * limit
+    pagination = {
+        "total": len(kept),
+        # A full result set means skills.sh probably cut it off.
+        "totalIsExact": len(hits) < SKILLSSH_MAX_RESULTS,
+        "page": page,
+        "totalPages": max(1, -(-len(kept) // limit)),
+        "hasNext": len(kept) > page * limit,
+    }
+    return kept[start : start + limit], pagination, len(hits) - len(kept)
+
+
+def _search_params(
+    source: str,
+    query: str,
+    sort: str,
     category: str | None = None,
     occupation: str | None = None,
     language: str | None = None,
-    exclude: list[str] | None = None,
-    output_json: bool = False,
-    output_plain: bool = False,
-) -> None:
-    params = {
+) -> dict:
+    if source == "skills.sh":
+        return {"q": query, "sort": sort}
+    return {
         "q": query,
         "sortBy": sort,
         "category": category,
         "occupation": occupation,
         "language": language,
     }
-    skills, pagination, excluded = _search(
-        params,
-        exclude or [],
-        limit=limit,
-        page=page,
-        request_json=lambda p: _api_request("search", p, use_json_errors=output_json),
-    )
+
+
+def _warn(msg: str) -> None:
+    print(f"skillsmp: {msg}", file=sys.stderr)
+
+
+def _cmd_search(
+    query: str,
+    *,
+    limit: int = 10,
+    page: int = 1,
+    sort: str | None = None,
+    category: str | None = None,
+    occupation: str | None = None,
+    language: str | None = None,
+    exclude: list[str] | None = None,
+    source: str = "skillsmp",
+    fallback: bool = False,
+    output_json: bool = False,
+    output_plain: bool = False,
+) -> None:
+    def run(src: str):
+        params = _search_params(
+            src, query, sort or DEFAULT_SORT[src], category, occupation, language
+        )
+        if src == "skills.sh" and fallback:
+            # Raise instead of exiting, so a failure can fall back.
+            request_json = lambda p: json.loads(
+                _fetch(_search_request(src, p), on_retry=_warn)
+            )
+        elif src == "skills.sh":
+            request_json = lambda p: json.loads(
+                _fetch_with_retry(_search_request(src, p), use_json_errors=output_json)
+            )
+        else:
+            request_json = lambda p: _api_request("search", p, use_json_errors=output_json)
+        return _search(
+            params, exclude or [], limit=limit, page=page, request_json=request_json, source=src
+        )
+
+    used = source
+    fell_back = None
+    try:
+        skills, pagination, excluded = run(source)
+    except FetchError as e:  # only raised when falling back is allowed
+        skills, pagination, excluded = [], {}, 0
+        fell_back = f"skills.sh failed ({e})"
+    if fallback and source == "skills.sh" and page == 1 and not skills:
+        fell_back = fell_back or "no results on skills.sh"
+        if not output_json:
+            _warn(f"{fell_back}; searching SkillsMP")
+        used = "skillsmp"
+        sort = None
+        skills, pagination, excluded = run(used)
+    else:
+        fell_back = None
 
     if output_json:
         extra = {"exclude": exclude, "excluded": excluded} if exclude else {}
+        if fell_back:
+            extra["fallbackReason"] = fell_back
         json.dump(
             {
                 "query": query,
+                "source": used,
                 "mode": "keyword",
                 "total": pagination.get("total", 0),
                 "totalIsExact": pagination.get("totalIsExact", True),
@@ -552,7 +731,7 @@ def _cmd_search(
     summary = _describe_pagination(pagination)
     if excluded:
         summary += f", {excluded} excluded"
-    print(f'Keyword search: "{query}" — {summary}\n')
+    print(f'{SOURCE_LABELS[used]} search: "{query}" — {summary}\n')
     if not skills:
         print("  No results found.")
         if _stderr_is_tty():
@@ -637,8 +816,9 @@ def _github_raw_urls(github_url: str) -> list[str]:
     ]
 
 
-def _fetch_skill_md(github_url: str) -> str | None:
-    for url in _github_raw_urls(github_url):
+def _fetch_first(urls) -> str | None:
+    """The body of the first URL that answers, or None."""
+    for url in urls:
         req = urllib.request.Request(
             url, headers={"User-Agent": f"skillsmp-cli/{__version__}"}
         )
@@ -648,6 +828,10 @@ def _fetch_skill_md(github_url: str) -> str | None:
         except (urllib.error.HTTPError, urllib.error.URLError):
             continue
     return None
+
+
+def _fetch_skill_md(github_url: str) -> str | None:
+    return _fetch_first(_github_raw_urls(github_url))
 
 
 def _find_skill(author: str, name: str, *, use_json_errors: bool = False) -> list[dict]:
@@ -671,21 +855,99 @@ def _find_skill(author: str, name: str, *, use_json_errors: bool = False) -> lis
     return []
 
 
-def _cmd_show(spec: str, *, output_json: bool = False) -> None:
-    author, _, name = spec.partition("/")
-    matches = _find_skill(author, name, use_json_errors=output_json)
+def _skillssh_files(d: dict) -> list[dict] | None:
+    """Every file in a skills.sh skill's folder, or None if unavailable."""
+    repo = d.get("repo") or ""
+    if repo.count("/") != 1:
+        return None  # Downloads only cover GitHub-hosted skills.
+    path = "/api/download/" + "/".join(
+        urllib.parse.quote(part, safe="") for part in (*repo.split("/"), d["name"])
+    )
+    try:
+        data = json.loads(_fetch(_skillssh_request(path)))
+    except (FetchError, ValueError):
+        return None
+    files = data.get("files")
+    return files if isinstance(files, list) else None
+
+
+def _get_skill_md(d: dict) -> str | None:
+    """A skill's SKILL.md: from skills.sh's cache, or straight from GitHub."""
+    if d["registry"] == "skills.sh":
+        repo = d.get("repo") or ""
+        if repo.count("/") != 1:
+            # A site like docs.stripe.com, which publishes its skills under
+            # /.well-known/ (the newer path first, as `npx skills` does).
+            name = urllib.parse.quote(d["name"], safe="")
+            return _fetch_first(
+                f"https://{repo}/.well-known/{path}/{name}/SKILL.md"
+                for path in ("agent-skills", "skills")
+            )
+        for f in _skillssh_files(d) or []:
+            if f.get("path") == "SKILL.md":
+                return f.get("contents")
+        return None
+    return _fetch_skill_md(d["githubUrl"])
+
+
+def _find_skill_skillssh(parts: list[str]) -> list[dict]:
+    """skills.sh hits for owner/name or owner/repo/name, most installed first."""
+    owner, name = parts[0], parts[-1]
+    params = {"q": name, "owner": owner, "limit": SKILLSSH_MAX_RESULTS}
+    if "." in owner:
+        # A site like docs.stripe.com, which the owner filter rejects
+        # (GitHub names have no dots); match it below instead.
+        del params["owner"]
+    data = json.loads(_fetch(_skillssh_request("/api/search", params), on_retry=_warn))
+    repo = "/".join(parts[:2]).lower() if len(parts) == 3 else None
+    matches = [
+        hit
+        for hit in map(_from_skillssh, data.get("skills", []))
+        if hit["name"].lower() == name.lower()
+        and hit["author"].lower() == owner.lower()
+        and (repo is None or hit["repo"].lower() == repo)
+    ]
+    return sorted(matches, key=lambda s: s["installs"] or 0, reverse=True)
+
+
+def _show_error(msg: str, *, output_json: bool) -> NoReturn:
+    if output_json:
+        json.dump({"error": msg}, sys.stdout, indent=2)
+        print()
+    else:
+        _warn(msg)
+    raise SystemExit(1)
+
+
+def _cmd_show(
+    spec: str, *, output_json: bool = False, source: str = "skillsmp", fallback: bool = False
+) -> None:
+    parts = spec.split("/")
+    matches: list[dict] = []
+    guessed = False
+    if source == "skills.sh" or len(parts) == 3:
+        try:
+            matches = _find_skill_skillssh(parts)
+        except FetchError as e:
+            if not fallback or len(parts) == 3:
+                _show_error(str(e), output_json=output_json)
+        if not matches and len(parts) == 3:
+            # Not in search results; the download below decides if it exists.
+            matches = [_from_skillssh({"source": "/".join(parts[:2]), "skillId": parts[2]})]
+            guessed = True
+    if not matches and len(parts) == 2 and (source == "skillsmp" or fallback):
+        matches = _find_skill(parts[0], parts[1], use_json_errors=output_json)
 
     if not matches:
-        if output_json:
-            json.dump({"error": f"skill not found: {spec}"}, sys.stdout, indent=2)
-            print()
-        else:
-            print(f"skillsmp: skill not found: {spec}", file=sys.stderr)
-        raise SystemExit(1)
+        _show_error(f"skill not found: {spec}", output_json=output_json)
 
     d = _normalize_skill(matches[0])
     others = [_normalize_skill(s) for s in matches[1:]]
-    skill_md = _fetch_skill_md(d["githubUrl"])
+    skill_md = _get_skill_md(d)
+    if guessed and skill_md is None:
+        _show_error(f"skill not found: {spec}", output_json=output_json)
+    if not d["description"] and skill_md:
+        d["description"] = _frontmatter_description(skill_md)
 
     if output_json:
         d["skillMd"] = skill_md
@@ -694,24 +956,29 @@ def _cmd_show(spec: str, *, output_json: bool = False) -> None:
         print()
         return
 
-    stars = _format_stars(d["stars"])
-    updated = _format_timestamp(d["updatedAt"])
-    print(f"{_skill_label(d)}  [{stars} stars, updated {updated}]\n")
+    print(f"{_skill_label(d)}  [{_skill_stats(d)}]\n")
     if d["description"]:
         print(f"{d['description']}\n")
-    if d["githubUrl"]:
-        print(f"github:   {d['githubUrl']}")
-    if d["skillUrl"]:
-        print(f"skillsmp: {d['skillUrl']}")
+    rows = [
+        ("github", d["githubUrl"]),
+        (d["registry"], d["skillUrl"]),
+        ("install", d["installCommand"] if d["registry"] == "skills.sh" else ""),
+    ]
+    for label, value in rows:
+        if value:
+            print(f"{label + ':':<11}{value}")
     if others:
-        print(f"skillsmp: {spec} also matched (showing the top result):", file=sys.stderr)
+        _warn(f"{spec} also matched (showing the top result):")
         for o in others:
-            lang = o["contentLanguage"] or "unknown language"
-            print(f"  {o['skillUrl']}  ({lang})", file=sys.stderr)
+            detail = o["contentLanguage"] or "unknown language"
+            if o["registry"] == "skills.sh":
+                detail = _skill_stats(o)
+            print(f"  {o['skillUrl']}  ({detail})", file=sys.stderr)
     if skill_md is not None:
         print(f"\n--- SKILL.md ---\n{skill_md}")
     else:
-        print("skillsmp: could not fetch SKILL.md from GitHub", file=sys.stderr)
+        where = "skills.sh" if d["registry"] == "skills.sh" else "GitHub"
+        _warn(f"could not fetch SKILL.md from {where}")
 
 
 # --- argument parsing ---
@@ -739,6 +1006,7 @@ def _parse_args(argv: list[str]) -> dict:
     sort: str | None = None
     filters: dict[str, str] = {}
     exclude: list[str] = []
+    source: str | None = None
     interactive = False
     output_json = False
     output_plain = False
@@ -775,6 +1043,10 @@ def _parse_args(argv: list[str]) -> dict:
             page = _parse_int_flag("--page", raw)
         elif arg in FILTER_FLAGS:
             filters[arg[2:]], i = _take_value(argv, i, arg)
+        elif arg == "--source":
+            source, i = _take_value(argv, i, arg)
+            if source not in SOURCES:
+                _die(f"--source must be 'skills.sh' or 'skillsmp' (got: {source})")
         elif arg in ("-x", "--exclude"):
             term, i = _take_value(argv, i, arg)
             if not term.strip():
@@ -814,8 +1086,9 @@ def _parse_args(argv: list[str]) -> dict:
     if limit is not None and not 1 <= limit <= MAX_LIMIT:
         _die(f"--limit must be 1-{MAX_LIMIT} (got: {limit})")
 
-    if sort is not None and sort not in ("stars", "recent"):
-        _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
+    all_sorts = SORTS["skills.sh"] + SORTS["skillsmp"]
+    if sort is not None and sort not in all_sorts:
+        _die(f"--sort must be one of {', '.join(all_sorts)} (got: {sort})")
 
     if command != "search" and (
         filters or exclude or any(x is not None for x in (limit, page, sort))
@@ -828,13 +1101,32 @@ def _parse_args(argv: list[str]) -> dict:
     if command in ("categories", "occupations") and query_parts:
         _die(f"the {command} command takes no arguments")
 
+    if command in ("categories", "occupations") and source is not None:
+        _die(f"--source does not apply to the {command} command (it lists SkillsMP's)")
+
     if command == "show":
         spec = query_parts[0] if query_parts else ""
-        author, _, name = spec.partition("/")
-        if len(query_parts) != 1 or not author or not name:
-            _die("show requires a <author>/<skill-name> argument")
+        parts = spec.split("/")
+        if len(query_parts) != 1 or len(parts) not in (2, 3) or not all(parts):
+            _die("show requires an <author>/<skill> or <owner>/<repo>/<skill> argument")
         if output_plain:
             _die("--plain does not apply to the show command")
+        if len(parts) == 3 and source == "skillsmp":
+            _die("<owner>/<repo>/<skill> is a skills.sh ID; use <author>/<skill> for SkillsMP")
+
+    # skills.sh is the default; SkillsMP-only options pick SkillsMP instead,
+    # and an explicit --source turns off falling back to the other one.
+    skillsmp_only = [f"--{name}" for name in filters]
+    if sort in SORTS["skillsmp"]:
+        skillsmp_only.append(f"--sort {sort}")
+    fallback = False
+    if source is None:
+        source = "skillsmp" if skillsmp_only else "skills.sh"
+        fallback = source == "skills.sh"
+    elif source == "skills.sh" and skillsmp_only:
+        _die(f"{skillsmp_only[0]} needs --source skillsmp")
+    elif source == "skillsmp" and sort in SORTS["skills.sh"]:
+        _die(f"--sort {sort} needs --source skills.sh")
 
     return {
         "mode": "interactive" if interactive else command,
@@ -842,7 +1134,9 @@ def _parse_args(argv: list[str]) -> dict:
         # The TUI has room for a longer page.
         "limit": limit if limit is not None else (20 if interactive else 10),
         "page": page if page is not None else 1,
-        "sort": sort if sort is not None else "stars",
+        "sort": sort if sort is not None else DEFAULT_SORT[source],
+        "source": source,
+        "fallback": fallback,
         "category": filters.get("category"),
         "occupation": filters.get("occupation"),
         "language": filters.get("language"),
@@ -877,7 +1171,12 @@ def _run() -> None:
     elif mode == "occupations":
         _cmd_occupations(output_json=args["json"], output_plain=args["plain"])
     elif mode == "show":
-        _cmd_show(args["query"], output_json=args["json"])
+        _cmd_show(
+            args["query"],
+            output_json=args["json"],
+            source=args["source"],
+            fallback=args["fallback"],
+        )
     elif mode == "interactive":
         # Imported here so plain searches don't pay Textual's startup cost.
         from skillsmp.tui import run
@@ -893,6 +1192,8 @@ def _run() -> None:
             occupation=args["occupation"],
             language=args["language"],
             exclude=args["exclude"],
+            source=args["source"],
+            fallback=args["fallback"],
             output_json=args["json"],
             output_plain=args["plain"],
         )
