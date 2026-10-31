@@ -28,6 +28,9 @@ RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 4.0
 _RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 MAX_LIMIT = 50
+# --exclude filters client-side, so it may need several API pages to fill one
+# page of results. Cap the requests so a broad exclusion can't loop for long.
+EXCLUDE_MAX_REQUESTS = 5
 DESC_DISPLAY_LIMIT = 200
 DESC_PLAIN_LIMIT = 120
 
@@ -99,18 +102,21 @@ def _full_help(color: bool) -> str:
       {lit("--category")} {dim("C")}    Filter by category slug (see: skillsmp categories)
       {lit("--occupation")} {dim("O")}  Filter by occupation slug (see: skillsmp occupations)
       {lit("--language")} {dim("L")}    Filter by content language code (en, zh, ja, ...)
+  {lit("-x, --exclude")} {dim("T")}     Drop results whose author/name or description contains T
+                      (case-insensitive, repeatable)
   {lit("-j, --json")}          Machine-readable JSON output
       {lit("--plain")}         One-line-per-result output for grep/awk
   {lit("-h, --help")}          Show this help
       {lit("--version")}       Show version
 
-  {dim("--limit, --page, --sort, and the filters apply to search only.")}
+  {dim("--limit, --page, --sort, --exclude, and the filters apply to search only.")}
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
   {lit("skillsmp --limit 5 --sort recent react testing")}
   {lit("skillsmp --category cicd --json deployment")}
   {lit("skillsmp --occupation lawyers --language en contracts")}
+  {lit("skillsmp -x native -x affaan-m react")}
   {lit("skillsmp show wshobson/terraform-module-library")}
   {lit("skillsmp --plain react | grep facebook")}
 
@@ -361,6 +367,58 @@ def _describe_pagination(pagination: dict) -> str:
     return f"page {pg}, last page"
 
 
+def _is_excluded(skill: dict, exclude: list[str]) -> bool:
+    d = _normalize_skill(skill)
+    haystack = f"{d['author']}/{d['name']}\n{d['description']}".lower()
+    return any(term.lower() in haystack for term in exclude)
+
+
+def _search_excluding(
+    params: dict, exclude: list[str], *, limit: int, page: int, use_json_errors: bool
+) -> tuple[list[dict], dict, int]:
+    """Search, drop excluded skills, and slice out one page of what's left.
+
+    Returns (skills, pagination, excluded_count). Pages count kept results, so
+    --page 2 starts where --page 1 ended.
+    """
+    kept: list[dict] = []
+    excluded = 0
+    api_page = 1
+    api_has_next = True
+    # One extra kept result tells us whether another page exists.
+    while (
+        len(kept) <= page * limit
+        and api_has_next
+        and api_page <= EXCLUDE_MAX_REQUESTS
+    ):
+        result = _api_request(
+            "search",
+            {**params, "limit": MAX_LIMIT, "page": api_page},
+            use_json_errors=use_json_errors,
+        )
+        data = result.get("data", {})
+        for s in data.get("skills", []):
+            if _is_excluded(s, exclude):
+                excluded += 1
+            else:
+                kept.append(s)
+        api_pagination = data.get("pagination", {})
+        api_has_next = api_pagination.get(
+            "hasNext", api_page < api_pagination.get("totalPages", 1)
+        )
+        api_page += 1
+
+    start = (page - 1) * limit
+    pagination = {
+        "total": len(kept),
+        "totalIsExact": not api_has_next,
+        "page": page,
+        "totalPages": max(1, -(-len(kept) // limit)),
+        "hasNext": api_has_next or len(kept) > page * limit,
+    }
+    return kept[start : start + limit], pagination, excluded
+
+
 def _cmd_search(
     query: str,
     *,
@@ -370,6 +428,7 @@ def _cmd_search(
     category: str | None = None,
     occupation: str | None = None,
     language: str | None = None,
+    exclude: list[str] | None = None,
     output_json: bool = False,
     output_plain: bool = False,
 ) -> None:
@@ -382,12 +441,19 @@ def _cmd_search(
         "occupation": occupation,
         "language": language,
     }
-    result = _api_request("search", params, use_json_errors=output_json)
-    data = result.get("data", {})
-    skills = data.get("skills", [])
-    pagination = data.get("pagination", {})
+    excluded = 0
+    if exclude:
+        skills, pagination, excluded = _search_excluding(
+            params, exclude, limit=limit, page=page, use_json_errors=output_json
+        )
+    else:
+        result = _api_request("search", params, use_json_errors=output_json)
+        data = result.get("data", {})
+        skills = data.get("skills", [])
+        pagination = data.get("pagination", {})
 
     if output_json:
+        extra = {"exclude": exclude, "excluded": excluded} if exclude else {}
         json.dump(
             {
                 "query": query,
@@ -397,6 +463,7 @@ def _cmd_search(
                 "page": pagination.get("page", 1),
                 "totalPages": pagination.get("totalPages", 1),
                 "hasNext": pagination.get("hasNext", False),
+                **extra,
                 "skills": [_normalize_skill(s) for s in skills],
             },
             sys.stdout,
@@ -410,7 +477,10 @@ def _cmd_search(
             _print_skill_plain(s)
         return
 
-    print(f'Keyword search: "{query}" — {_describe_pagination(pagination)}\n')
+    summary = _describe_pagination(pagination)
+    if excluded:
+        summary += f", {excluded} excluded"
+    print(f'Keyword search: "{query}" — {summary}\n')
     if not skills:
         print("  No results found.")
         if _stderr_is_tty():
@@ -596,6 +666,7 @@ def _parse_args(argv: list[str]) -> dict:
     page: int | None = None
     sort: str | None = None
     filters: dict[str, str] = {}
+    exclude: list[str] = []
     output_json = False
     output_plain = False
     query_parts: list[str] = []
@@ -629,6 +700,11 @@ def _parse_args(argv: list[str]) -> dict:
             page = _parse_int_flag("--page", raw)
         elif arg in FILTER_FLAGS:
             filters[arg[2:]], i = _take_value(argv, i, arg)
+        elif arg in ("-x", "--exclude"):
+            term, i = _take_value(argv, i, arg)
+            if not term.strip():
+                _die(f"{arg} requires a non-empty value")
+            exclude.append(term.strip())
         elif arg == "--":
             i += 1
             query_parts.extend(argv[i:])
@@ -658,9 +734,11 @@ def _parse_args(argv: list[str]) -> dict:
     if sort is not None and sort not in ("stars", "recent"):
         _die(f"--sort must be 'stars' or 'recent' (got: {sort})")
 
-    if command != "search" and (filters or any(x is not None for x in (limit, page, sort))):
+    if command != "search" and (
+        filters or exclude or any(x is not None for x in (limit, page, sort))
+    ):
         _die(
-            "--limit, --page, --sort, --category, --occupation, --language "
+            "--limit, --page, --sort, --category, --occupation, --language, --exclude "
             f"do not apply to the {command} command"
         )
 
@@ -684,6 +762,7 @@ def _parse_args(argv: list[str]) -> dict:
         "category": filters.get("category"),
         "occupation": filters.get("occupation"),
         "language": filters.get("language"),
+        "exclude": exclude,
         "json": output_json,
         "plain": output_plain,
     }
@@ -724,6 +803,7 @@ def _run() -> None:
             category=args["category"],
             occupation=args["occupation"],
             language=args["language"],
+            exclude=args["exclude"],
             output_json=args["json"],
             output_plain=args["plain"],
         )

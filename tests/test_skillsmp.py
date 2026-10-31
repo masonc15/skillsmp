@@ -824,6 +824,85 @@ class TestSearchFilters:
         assert "language=en" in url
 
 
+class TestExclude:
+    @staticmethod
+    def page_response(skills, has_next):
+        return make_response(
+            {"data": {"skills": skills, "pagination": {"hasNext": has_next}}}
+        )
+
+    def test_parses_repeated_terms(self):
+        parsed = parse_args(["-x", "native", "--exclude", " affaan-m ", "react"])
+        assert parsed["exclude"] == ["native", "affaan-m"]
+        assert parse_args(["react"])["exclude"] == []
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["-x"], ["--exclude", "", "q"], ["show", "acme/x", "-x", "y"], ["categories", "-x", "y"]],
+    )
+    def test_usage_errors(self, argv):
+        with pytest.raises(SystemExit) as exc:
+            parse_args(argv)
+        assert_exit_code(exc, 2)
+
+    def test_matches_author_name_and_description_case_insensitively(self, make_skill):
+        skill = make_skill(author="Acme", name="deploy", description="Uses React Native")
+        assert skillsmp._is_excluded(skill, ["acme/"])
+        assert skillsmp._is_excluded(skill, ["DEPLOY"])
+        assert skillsmp._is_excluded(skill, ["native"])
+        assert not skillsmp._is_excluded(skill, ["vue"])
+
+    def test_refills_page_across_api_pages(self, capsys, make_skill):
+        first = [make_skill(name=f"native-{i}") for i in range(3)] + [make_skill(name="a")]
+        second = [make_skill(name="b"), make_skill(name="c")]
+        responses = [self.page_response(first, True), self.page_response(second, False)]
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=responses) as patched:
+            skillsmp._cmd_search("q", limit=2, exclude=["native"], output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert [s["name"] for s in data["skills"]] == ["a", "b"]
+        assert data["excluded"] == 3
+        assert data["exclude"] == ["native"]
+        assert data["hasNext"] is True
+        assert data["totalIsExact"] is True
+        urls = [c.args[0].full_url for c in patched.call_args_list]
+        assert f"limit={skillsmp.MAX_LIMIT}" in urls[0]
+        assert "page=1" in urls[0] and "page=2" in urls[1]
+
+    def test_page_counts_kept_results(self, capsys, make_skill):
+        skills = [make_skill(name=n) for n in ("a", "skip", "b", "c", "d")]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=self.page_response(skills, False)
+        ):
+            skillsmp._cmd_search("q", limit=2, page=2, exclude=["skip"], output_plain=True)
+        lines = capsys.readouterr().out.splitlines()
+        assert [line.split("\t")[0] for line in lines] == ["acme/c", "acme/d"]
+
+    def test_stops_after_request_cap(self, make_skill):
+        everything_excluded = self.page_response([make_skill(name="native")], True)
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=everything_excluded
+        ) as patched:
+            skillsmp._cmd_search("q", exclude=["native"], output_plain=True)
+        assert patched.call_count == skillsmp.EXCLUDE_MAX_REQUESTS
+
+    def test_human_output_reports_excluded_count(self, capsys, make_skill):
+        skills = [make_skill(name="keep"), make_skill(name="native")]
+        with mock.patch(
+            "skillsmp.urllib.request.urlopen", return_value=self.page_response(skills, False)
+        ):
+            skillsmp._cmd_search("q", exclude=["native"])
+        out = capsys.readouterr().out
+        assert "1 results (page 1/1), 1 excluded" in out
+        assert "acme/keep" in out
+        assert "acme/native" not in out
+
+    def test_no_exclude_keeps_single_request(self, mock_urlopen, make_keyword_response):
+        with mock_urlopen(make_keyword_response()) as patched:
+            skillsmp._cmd_search("q", limit=5)
+        assert patched.call_count == 1
+        assert "limit=5" in patched.call_args.args[0].full_url
+
+
 class TestBrokenPipe:
     def test_closed_stdout_exits_quietly(self):
         with mock.patch("skillsmp._run", side_effect=BrokenPipeError), mock.patch(

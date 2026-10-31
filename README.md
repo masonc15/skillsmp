@@ -59,6 +59,12 @@ skillsmp categories
 skillsmp occupations | grep engineer
 ```
 
+`-x`/`--exclude` drops results whose `author/name` or description contains a term (case-insensitive). Repeat it to exclude several things. The API has no exclusion of its own, so the CLI fetches extra pages to fill `--limit` and counts `--page` over what's left, giving up after 5 requests:
+
+```
+skillsmp -x native -x affaan-m react
+```
+
 ## Skill details
 
 `show` prints everything about one skill — full description, links, and its SKILL.md fetched straight from GitHub:
@@ -77,10 +83,11 @@ skillsmp show --json wshobson/terraform-module-library
     --category C    Filter by category slug
     --occupation O  Filter by occupation slug
     --language L    Filter by content language code
+-x, --exclude T     Drop results mentioning T (repeatable)
 -j, --json          JSON output
     --plain         Tab-separated, one line per result
 -h, --help          Show help
     --version       Show version
 ```
 
-`--limit`, `--page`, `--sort`, and the filters apply to search only.
+`--limit`, `--page`, `--sort`, `--exclude`, and the filters apply to search only.
