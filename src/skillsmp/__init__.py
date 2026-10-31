@@ -466,7 +466,7 @@ def _skill_stats(d: dict) -> str:
     if d["registry"] == "skills.sh":
         stats = "installs unknown"
         if d["installs"] is not None:
-            stats = f"{_format_stars(d['installs'])} installs"
+            stats = f"{_format_stars(d['installs'])} install{'' if d['installs'] == 1 else 's'}"
         if d["updatedAt"]:
             stats += f", updated {_format_timestamp(d['updatedAt'])}"
         elif d["repoMissing"]:

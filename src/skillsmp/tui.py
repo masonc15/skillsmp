@@ -297,7 +297,8 @@ def _detail_text(d: dict, description: str = "", dates_pending: bool = False) ->
         if d["installs"] is None:
             meta = ["installs unknown"]
         else:
-            meta = [f"{core._format_stars(d['installs'])} installs"]
+            plural = "" if d["installs"] == 1 else "s"
+            meta = [f"{core._format_stars(d['installs'])} install{plural}"]
         if d["updatedAt"]:
             age = _age(d["updatedAt"])
             ago = age if age == "today" else f"{age} ago"
