@@ -29,6 +29,7 @@ The key is only ever sent to SkillsMP.
 ```
 skillsmp terraform
 skillsmp --sort installs react testing
+skillsmp --sort updated nsfw
 skillsmp show hashicorp/agent-skills/terraform-test
 ```
 
@@ -43,7 +44,7 @@ skillsmp --plain react | grep facebook
 
 skills.sh is the default. Its catalog comes from what people actually install with `npx skills`, so it's current and ranked by relevance (or by install count with `--sort installs`). Multi-word queries get a semantic search. It returns at most 200 results for a query, all in one request, and the CLI pages through them locally. It has no descriptions in search results, so `show` and the TUI read them from each skill's SKILL.md.
 
-skills.sh doesn't say when a skill last changed either, so the CLI asks GitHub for the last commit to the skill's folder and shows it as "updated 2026-08-10" (`updatedAt` in JSON, the last column with `--plain`, and an age like `3mo` in the TUI). That needs a GitHub token: `GITHUB_TOKEN`, `GH_TOKEN`, or whatever `gh auth token` prints. Finding a skill's folder means reading its repo's file tree once; the answer is cached in `~/.cache/skillsmp/` for a week, so later searches cost one quick GitHub query per few results. Skills whose repo has been deleted say "GitHub repo deleted" (`repoMissing` in JSON, a red `gone` in the TUI), since `npx skills add` can't install them anymore. A few skills that were renamed in their repo after skills.sh indexed them, and skills hosted on websites, show no date.
+skills.sh doesn't say when a skill last changed either, so the CLI asks GitHub for the last commit to the skill's folder and shows it as "updated 2026-08-10" (`updatedAt` in JSON, the last column with `--plain`, and an age like `3mo` in the TUI). That needs a GitHub token: `GITHUB_TOKEN`, `GH_TOKEN`, or whatever `gh auth token` prints. Finding a skill's folder means reading its repo's file tree once; the answer is cached in `~/.cache/skillsmp/` for a week, so later searches cost one quick GitHub query per few results. `--sort updated` puts the most recently changed skills first, which means looking up every result rather than one page's worth: the first time you sort a query that way takes several seconds (about 10 for a full 200 results), and later sorts take about a second. Skills with no known date go last. Skills whose repo has been deleted say "GitHub repo deleted" (`repoMissing` in JSON, a red `gone` in the TUI), since `npx skills add` can't install them anymore. A few skills that were renamed in their repo after skills.sh indexed them, and skills hosted on websites, show no date.
 
 SkillsMP is a bigger crawl of GitHub with stars, categories and per-language filtering. The CLI uses it when skills.sh returns no results or fails, when the query is a single character (skills.sh needs two), or when you ask for something only SkillsMP has: `--category`, `--occupation`, `--language`, or `--sort stars`/`recent`. Results that came from SkillsMP say so in the header (and in `source` in JSON, with a `fallbackReason`).
 
@@ -104,7 +105,7 @@ An `owner/skill` that skills.sh doesn't know falls back to SkillsMP, which fetch
 -i, --interactive   Browse results in a full-screen TUI
 -n, --limit N       Results per page (1-50, default: 10, or 20 with -i)
 -p, --page N        Page number (default: 1)
--s, --sort KEY      skills.sh: relevance (default), installs
+-s, --sort KEY      skills.sh: relevance (default), installs, updated
                     SkillsMP: stars (default), recent
     --source S      skills.sh or skillsmp (default: skills.sh with fallback)
     --category C    Filter by category slug

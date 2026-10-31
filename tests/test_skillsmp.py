@@ -210,7 +210,7 @@ class TestErrorMessages:
             (["--bogus", "q"], "unknown flag: --bogus"),
             (["--json", "--plain", "q"], "mutually exclusive"),
             (["--limit", "200", "q"], "1-50"),
-            (["--sort", "name", "q"], "relevance, installs, stars, recent"),
+            (["--sort", "name", "q"], "relevance, installs, updated, stars, recent"),
             (["--ai", "q"], "retired"),
             (["show", "acme/x", "--limit", "5"], "do not apply"),
         ],

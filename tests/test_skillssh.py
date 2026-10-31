@@ -284,6 +284,7 @@ class TestSourceSelection:
         [
             (["q"], "skills.sh", True, "relevance"),
             (["--sort", "installs", "q"], "skills.sh", True, "installs"),
+            (["--sort", "updated", "q"], "skills.sh", True, "updated"),
             (["--sort", "recent", "q"], "skillsmp", False, "recent"),
             (["--category", "devops", "q"], "skillsmp", False, "stars"),
             (["--source", "skills.sh", "q"], "skills.sh", False, "relevance"),
@@ -302,6 +303,7 @@ class TestSourceSelection:
             (["--source", "skills.sh", "--language", "en", "q"], "--language needs --source skillsmp"),
             (["--source", "skills.sh", "--sort", "stars", "q"], "--sort stars needs --source skillsmp"),
             (["--source", "skillsmp", "--sort", "installs", "q"], "--sort installs needs --source skills.sh"),
+            (["--source", "skillsmp", "--sort", "updated", "q"], "--sort updated needs --source skills.sh"),
             (["show", "--source", "skillsmp", "a/b/c"], "skills.sh ID"),
             (["show", "a/b/c/d"], "<owner>/<repo>/<skill>"),
             (["categories", "--source", "skillsmp"], "--source does not apply"),
@@ -438,3 +440,45 @@ class TestPickSkillDir:
     def test_blob_sha_matches_git(self):
         # `printf 'hello\n' | git hash-object --stdin`
         assert skillsmp._git_blob_sha("hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+
+class TestSortByUpdated:
+    ORDER = [
+        "hashicorp/agent-skills/terraform-style-guide",
+        "hashicorp/agent-skills/terraform-test",
+        "acme/infra/terraform-native",
+        "docs.stripe.com/stripe-docs",  # no date, so last
+    ]
+
+    def test_newest_first_across_pages(self, router, token, capsys):
+        search(sort="updated", output_json=True)
+        data = json.loads(capsys.readouterr().out)
+        assert [s["id"] for s in data["skills"]] == self.ORDER
+        search(sort="updated", limit=2, page=2, output_plain=True)
+        lines = capsys.readouterr().out.splitlines()
+        assert [line.split("\t")[0] for line in lines] == self.ORDER[2:]
+        assert lines[0].split("\t")[-1] == "2025-01-02"
+
+    def test_exclusions_applied_before_lookups(self, router, token, capsys):
+        search(sort="updated", exclude=["acme/"], output_json=True)
+        assert [s["id"] for s in json.loads(capsys.readouterr().out)["skills"]] == [
+            self.ORDER[0], self.ORDER[1], self.ORDER[3]
+        ]
+        assert not any("acme/infra" in u for u in github_urls(router))
+
+    def test_no_token_is_an_error_not_a_fallback(self, router, capsys):
+        with pytest.raises(SystemExit) as exc:
+            search(sort="updated", fallback=True)
+        assert exc.value.code == 1
+        assert "sorting by last commit needs a GitHub token" in capsys.readouterr().err
+        assert "skillsmp.com" not in router.hosts()
+
+    def test_github_failure_is_an_error_not_a_fallback(self, token, capsys):
+        r = Router(github_error=500)
+        with mock.patch("skillsmp.urllib.request.urlopen", side_effect=r), mock.patch(
+            "skillsmp.time.sleep"
+        ), pytest.raises(SystemExit) as exc:
+            search(sort="updated", fallback=True, output_json=True)
+        assert exc.value.code == 1
+        assert json.loads(capsys.readouterr().out)["code"] == 500
+        assert "skillsmp.com" not in r.hosts()

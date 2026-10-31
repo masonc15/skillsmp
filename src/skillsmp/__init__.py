@@ -44,7 +44,7 @@ SKILLSSH_URL = "https://skills.sh"
 SKILLSSH_MAX_RESULTS = 200
 SOURCES = ("skills.sh", "skillsmp")
 SOURCE_LABELS = {"skills.sh": "skills.sh", "skillsmp": "SkillsMP"}
-SORTS = {"skills.sh": ("relevance", "installs"), "skillsmp": ("stars", "recent")}
+SORTS = {"skills.sh": ("relevance", "installs", "updated"), "skillsmp": ("stars", "recent")}
 DEFAULT_SORT = {source: sorts[0] for source, sorts in SORTS.items()}
 DESC_PLAIN_LIMIT = 120
 GITHUB_API = "https://api.github.com"
@@ -123,7 +123,7 @@ def _full_help(color: bool) -> str:
   {lit("-i, --interactive")}   Browse results in a full-screen TUI
   {lit("-n, --limit")} {dim("N")}       Results per page (1-50, default: 10, or 20 with -i)
   {lit("-p, --page")} {dim("N")}        Page number (default: 1)
-  {lit("-s, --sort")} {dim("KEY")}      skills.sh: relevance (default), installs
+  {lit("-s, --sort")} {dim("KEY")}      skills.sh: relevance (default), installs, updated
                       SkillsMP: stars (default), recent
       {lit("--source")} {dim("S")}      skills.sh or skillsmp (default: skills.sh, falling
                       back to SkillsMP when it has no results or fails)
@@ -299,19 +299,19 @@ def _fetch_with_retry(
     req: urllib.request.Request, *, use_json_errors: bool = False
 ) -> bytes:
     """Like _fetch, but report a failure and exit 1."""
-
-    def warn(msg: str) -> None:
-        print(f"skillsmp: {msg}", file=sys.stderr)
-
     try:
-        return _fetch(req, on_retry=warn)
+        return _fetch(req, on_retry=lambda msg: print(f"skillsmp: {msg}", file=sys.stderr))
     except FetchError as e:
-        if use_json_errors:
-            json.dump(e.payload, sys.stdout, indent=2)
-            print()
-        else:
-            warn(str(e))
-        raise SystemExit(1)
+        _exit_with(e, use_json_errors=use_json_errors)
+
+
+def _exit_with(e: FetchError, *, use_json_errors: bool) -> NoReturn:
+    if use_json_errors:
+        json.dump(e.payload, sys.stdout, indent=2)
+        print()
+    else:
+        print(f"skillsmp: {e}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def _api_url_request(endpoint: str, params: dict) -> urllib.request.Request:
@@ -572,6 +572,7 @@ def _search(
     stream: bool = False,
     max_api_pages: int = EXCLUDE_MAX_REQUESTS,
     source: str = "skillsmp",
+    commit_dates: Callable[[list[dict]], dict[str, dict]] | None = None,
 ) -> tuple[list[dict], dict, int]:
     """Run one search page through `request_json` (search params -> response).
 
@@ -583,7 +584,14 @@ def _search(
     For skills.sh, `params` is {"q", "sort"}; for SkillsMP, the API's own.
     """
     if source == "skills.sh":
-        return _search_skillssh(params, exclude, limit=limit, page=page, request_json=request_json)
+        return _search_skillssh(
+            params,
+            exclude,
+            limit=limit,
+            page=page,
+            request_json=request_json,
+            commit_dates=commit_dates,
+        )
     if not exclude and not stream:
         data = request_json({**params, "limit": limit, "page": page}).get("data", {})
         return data.get("skills", []), data.get("pagination", {}), 0
@@ -628,8 +636,13 @@ def _search_skillssh(
     limit: int,
     page: int,
     request_json: Callable[[dict], dict],
+    commit_dates: Callable[[list[dict]], dict[str, dict]] | None = None,
 ) -> tuple[list[dict], dict, int]:
-    """One request returns every hit skills.sh has; pages are cut from it."""
+    """One request returns every hit skills.sh has; pages are cut from it.
+
+    Sorting by "updated" needs `commit_dates` (see _commit_dates) for every
+    hit, not just one page's worth.
+    """
     query = params["q"]
     if len(query.strip()) < 2:
         hits: list[dict] = []  # skills.sh rejects one-character queries
@@ -639,6 +652,12 @@ def _search_skillssh(
     if params.get("sort") == "installs":
         hits.sort(key=lambda s: s["installs"] or 0, reverse=True)
     kept = [s for s in hits if not _is_excluded(s, exclude)]
+    if params.get("sort") == "updated":
+        info = (commit_dates or _commit_dates_or_fail)([_normalize_skill(s) for s in kept])
+        for skill in kept:
+            skill.update(info.get(skill["id"], {}))
+        # Newest first; skills without a date keep their relevance order last.
+        kept.sort(key=lambda s: s.get("updatedAt") or "", reverse=True)
     start = (page - 1) * limit
     pagination = {
         "total": len(kept),
@@ -704,8 +723,22 @@ def _cmd_search(
             )
         else:
             request_json = lambda p: _api_request("search", p, use_json_errors=output_json)
+
+        def commit_dates(skills: list[dict]) -> dict[str, dict]:
+            # A GitHub failure here isn't skills.sh failing, so don't fall back.
+            try:
+                return _commit_dates_or_fail(skills)
+            except FetchError as e:
+                _exit_with(e, use_json_errors=output_json)
+
         return _search(
-            params, exclude or [], limit=limit, page=page, request_json=request_json, source=src
+            params,
+            exclude or [],
+            limit=limit,
+            page=page,
+            request_json=request_json,
+            source=src,
+            commit_dates=commit_dates,
         )
 
     used = source
@@ -725,8 +758,8 @@ def _cmd_search(
     else:
         fell_back = None
 
-    if used == "skills.sh" and skills:
-        _add_commit_dates(skills)
+    if used == "skills.sh" and skills and (sort or DEFAULT_SORT[used]) != "updated":
+        _add_commit_dates(skills)  # (sorting by date already looked them up)
 
     if output_json:
         extra = {"exclude": exclude, "excluded": excluded} if exclude else {}
@@ -1158,6 +1191,18 @@ def _commit_dates(
 
 def _missing_token_hint() -> str:
     return "last-commit dates need a GitHub token (set GITHUB_TOKEN or run gh auth login)"
+
+
+def _require_token_to_sort() -> None:
+    if not _github_token():
+        hint = _missing_token_hint().replace("last-commit dates need", "sorting by last commit needs")
+        raise FetchError(hint, {"error": hint})
+
+
+def _commit_dates_or_fail(skills: list[dict]) -> dict[str, dict]:
+    """_commit_dates, but a missing token is an error rather than no dates."""
+    _require_token_to_sort()
+    return _commit_dates(skills)
 
 
 def _add_commit_dates(skills: list[dict], skill_mds: dict[str, str] | None = None) -> None:
