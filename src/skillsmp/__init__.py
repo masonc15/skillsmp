@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Callable, NoReturn
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 BASE_URL = "https://skillsmp.com/api/v1/skills"
 MCP_URL = "https://skillsmp.com/mcp"
