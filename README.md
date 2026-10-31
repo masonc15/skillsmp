@@ -65,6 +65,17 @@ skillsmp occupations | grep engineer
 skillsmp -x native -x affaan-m react
 ```
 
+## Interactive mode
+
+`-i` opens a full-screen browser instead of printing results. The list is on the left and the highlighted skill's details and SKILL.md are on the right. It takes the same flags as a normal search, and the query is optional:
+
+```
+skillsmp -i react
+skillsmp -i --sort recent --language en
+```
+
+Move with the arrow keys or `j`/`k`, and change pages with `←`/`→` (or `[`/`]`). The next page is fetched in the background, so paging forward is usually instant. `/` jumps to the search box, which re-runs as you type. A word starting with `-` in the box works like `--exclude`, so `react -native` hides anything mentioning native. `x` hides every skill with the highlighted skill's name and `X` hides its author; both add a term to the search box, so deleting it there brings them back. `s` switches between stars and recent, Enter opens SKILL.md full screen, `o` opens the skill on GitHub, `w` opens its SkillsMP page, `y` copies its GitHub URL, and `q` quits.
+
 ## Skill details
 
 `show` prints everything about one skill — full description, links, and its SKILL.md fetched straight from GitHub:
@@ -77,7 +88,8 @@ skillsmp show --json wshobson/terraform-module-library
 ## Flags
 
 ```
--n, --limit N       Results per page (1-50, default: 10)
+-i, --interactive   Browse results in a full-screen TUI
+-n, --limit N       Results per page (1-50, default: 10, or 20 with -i)
 -p, --page N        Page number (default: 1)
 -s, --sort KEY      Sort by: stars, recent (default: stars)
     --category C    Filter by category slug

@@ -86,6 +86,7 @@ def _full_help(color: bool) -> str:
 
 {bold("Usage:")}
   {lit("skillsmp")} {dim("[flags] <query ...>")}
+  {lit("skillsmp -i")} {dim("[flags] [query ...]")}
   {lit("skillsmp show")} {dim("<author>/<skill-name>")}
   {lit("skillsmp categories")}
   {lit("skillsmp occupations")}
@@ -96,7 +97,8 @@ def _full_help(color: bool) -> str:
   {lit("occupations")}     List occupation slugs for --occupation
 
 {bold("Flags:")}
-  {lit("-n, --limit")} {dim("N")}       Results per page (1-50, default: 10)
+  {lit("-i, --interactive")}   Browse results in a full-screen TUI
+  {lit("-n, --limit")} {dim("N")}       Results per page (1-50, default: 10, or 20 with -i)
   {lit("-p, --page")} {dim("N")}        Page number (default: 1)
   {lit("-s, --sort")} {dim("KEY")}      Sort order: stars, recent (default: stars)
       {lit("--category")} {dim("C")}    Filter by category slug (see: skillsmp categories)
@@ -113,6 +115,7 @@ def _full_help(color: bool) -> str:
 
 {bold("Examples:")}
   {lit("skillsmp terraform")}
+  {lit("skillsmp -i react")}
   {lit("skillsmp --limit 5 --sort recent react testing")}
   {lit("skillsmp --category cicd --json deployment")}
   {lit("skillsmp --occupation lawyers --language en contracts")}
@@ -694,6 +697,7 @@ def _parse_args(argv: list[str]) -> dict:
     sort: str | None = None
     filters: dict[str, str] = {}
     exclude: list[str] = []
+    interactive = False
     output_json = False
     output_plain = False
     query_parts: list[str] = []
@@ -713,6 +717,8 @@ def _parse_args(argv: list[str]) -> dict:
             raise SystemExit(0)
         elif arg in ("-a", "--ai"):
             _die("AI semantic search was retired by SkillsMP; use keyword search instead")
+        elif arg in ("-i", "--interactive"):
+            interactive = True
         elif arg in ("-j", "--json"):
             output_json = True
         elif arg == "--plain":
@@ -746,8 +752,16 @@ def _parse_args(argv: list[str]) -> dict:
             query_parts.append(arg)
         i += 1
 
+    if interactive:
+        if command != "search":
+            _die(f"--interactive does not apply to the {command} command")
+        if output_json or output_plain:
+            _die("--interactive cannot be combined with --json or --plain")
+        if not (_isatty(sys.stdin) and _isatty(sys.stdout)):
+            _die("--interactive needs a terminal")
+
     # No args at all: concise help.
-    if command == "search" and not query_parts:
+    if command == "search" and not query_parts and not interactive:
         print(_concise_help(_stderr_is_tty()), file=sys.stderr)
         raise SystemExit(2)
 
@@ -781,9 +795,10 @@ def _parse_args(argv: list[str]) -> dict:
             _die("--plain does not apply to the show command")
 
     return {
-        "mode": command,
+        "mode": "interactive" if interactive else command,
         "query": " ".join(query_parts),
-        "limit": limit if limit is not None else 10,
+        # The TUI has room for a longer page.
+        "limit": limit if limit is not None else (20 if interactive else 10),
         "page": page if page is not None else 1,
         "sort": sort if sort is not None else "stars",
         "category": filters.get("category"),
@@ -821,6 +836,11 @@ def _run() -> None:
         _cmd_occupations(output_json=args["json"], output_plain=args["plain"])
     elif mode == "show":
         _cmd_show(args["query"], output_json=args["json"])
+    elif mode == "interactive":
+        # Imported here so plain searches don't pay Textual's startup cost.
+        from skillsmp.tui import run
+
+        run(args)
     else:
         _cmd_search(
             args["query"],
