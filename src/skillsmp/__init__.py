@@ -401,14 +401,23 @@ def _is_excluded(skill: dict, exclude: list[str]) -> bool:
     return any(term.lower() in haystack for term in exclude)
 
 
-def _search_excluding(
-    params: dict, exclude: list[str], *, limit: int, page: int, use_json_errors: bool
+def _search(
+    params: dict,
+    exclude: list[str],
+    *,
+    limit: int,
+    page: int,
+    request_json: Callable[[dict], dict],
 ) -> tuple[list[dict], dict, int]:
-    """Search, drop excluded skills, and slice out one page of what's left.
+    """Run one search page through `request_json` (search params -> response).
 
-    Returns (skills, pagination, excluded_count). Pages count kept results, so
-    --page 2 starts where --page 1 ended.
+    Returns (skills, pagination, excluded_count). With exclusions, pages count
+    kept results, so page 2 starts where page 1 ended.
     """
+    if not exclude:
+        data = request_json({**params, "limit": limit, "page": page}).get("data", {})
+        return data.get("skills", []), data.get("pagination", {}), 0
+
     kept: list[dict] = []
     excluded = 0
     api_page = 1
@@ -419,12 +428,7 @@ def _search_excluding(
         and api_has_next
         and api_page <= EXCLUDE_MAX_REQUESTS
     ):
-        result = _api_request(
-            "search",
-            {**params, "limit": MAX_LIMIT, "page": api_page},
-            use_json_errors=use_json_errors,
-        )
-        data = result.get("data", {})
+        data = request_json({**params, "limit": MAX_LIMIT, "page": api_page}).get("data", {})
         for s in data.get("skills", []):
             if _is_excluded(s, exclude):
                 excluded += 1
@@ -462,23 +466,18 @@ def _cmd_search(
 ) -> None:
     params = {
         "q": query,
-        "limit": limit,
-        "page": page,
         "sortBy": sort,
         "category": category,
         "occupation": occupation,
         "language": language,
     }
-    excluded = 0
-    if exclude:
-        skills, pagination, excluded = _search_excluding(
-            params, exclude, limit=limit, page=page, use_json_errors=output_json
-        )
-    else:
-        result = _api_request("search", params, use_json_errors=output_json)
-        data = result.get("data", {})
-        skills = data.get("skills", [])
-        pagination = data.get("pagination", {})
+    skills, pagination, excluded = _search(
+        params,
+        exclude or [],
+        limit=limit,
+        page=page,
+        request_json=lambda p: _api_request("search", p, use_json_errors=output_json),
+    )
 
     if output_json:
         extra = {"exclude": exclude, "excluded": excluded} if exclude else {}
