@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -353,10 +354,24 @@ class FakeBoth(FakeAPI):
         self.hits = hits
         self.hosts: list[str] = []
         self.searches: list[str] = []  # skills.sh search URLs
+        self.github: list[str] = []
 
     def __call__(self, req, on_retry=None, on_headers=None) -> bytes:
         url = urllib.parse.urlsplit(req.full_url)
         self.hosts.append(url.netloc)
+        if url.netloc == "api.github.com":
+            self.github.append(url.path)
+            if url.path.endswith("/git/trees/HEAD"):
+                tree = [{"type": "blob", "path": f"skills/skill-{i}/SKILL.md", "sha": "x"} for i in range(45)]
+                return json.dumps({"tree": tree}).encode()
+            query = json.loads(req.data)["query"]
+            data = {
+                alias: {"defaultBranchRef": {"target": {"history": {"nodes": [
+                    {"committedDate": f"2026-0{1 + int(n) % 9}-15T00:00:00Z"}
+                ]}}}}
+                for alias, n in re.findall(r'(r\d+): .*?path: "skills/skill-(\d+)"', query)
+            }
+            return json.dumps({"data": data}).encode()
         if url.netloc != "skills.sh":
             return super().__call__(req, on_retry, on_headers)
         assert on_headers is None
@@ -449,6 +464,75 @@ class TestSkillsSh:
                 assert len(both.searches) == 1  # served from cache
 
             run_app(Search("deploy", fallback=True), script)
+
+
+class TestCommitDates:
+    def test_rows_and_detail_show_last_commit(self, both, monkeypatch):
+        monkeypatch.setattr(skillsmp, "_github_token", lambda: "t")
+        monkeypatch.setattr(tui, "_age", lambda ts, now=None: f"age:{ts[:7]}" if ts else "")
+
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await until(pilot, lambda: "updated 2026-01-15" in str(app.meta.render()))
+            row = app.results.get_option_at_index(1).prompt
+            cells = [str(c) for c in row.columns[2]._cells]
+            assert cells == ["age:2026-02"]
+            assert both.github.count("/graphql") == 4  # 20 skills, 5 a query
+            await pilot.press("right")
+            await until(pilot, lambda: app.search.page == 2 and "2026-03-15" in str(app.meta.render()))
+            assert len([u for u in both.github if "trees" in u]) == 1
+
+        run_app(Search("deploy"), script)
+
+    def test_deleted_repo_marked_gone(self, monkeypatch):
+        monkeypatch.setattr(skillsmp, "_github_token", lambda: "t")
+        fake = FakeBoth(hits=[{"id": "gone/repo/x", "source": "gone/repo", "skillId": "x", "installs": 3}])
+
+        def fetch(req, on_retry=None, on_headers=None):
+            if "/git/trees/" in req.full_url:
+                raise skillsmp.FetchError("API error (404): Not Found", {"error": "Not Found", "code": 404})
+            return fake(req, on_retry, on_headers)
+
+        with mock.patch("skillsmp._fetch", fetch):
+
+            async def script(app, pilot):
+                await until(pilot, lambda: "GitHub repo deleted" in str(app.meta.render()))
+                row = app.results.get_option_at_index(0).prompt
+                assert [str(c) for c in row.columns[2]._cells] == ["gone"]
+
+            run_app(Search("deploy"), script)
+
+    def test_no_token_warns_once(self, both):
+        async def script(app, pilot):
+            await until(pilot, lambda: app.skills)
+            await until(pilot, lambda: "last commit unknown" in str(app.meta.render()))
+            assert app._warned_no_token
+            notify = mock.Mock(wraps=app.notify)
+            app.notify = notify
+            await pilot.press("right")
+            await until(pilot, lambda: app.search.page == 2)
+            await until(pilot, lambda: "last commit unknown" in str(app.meta.render()))
+            assert not [c for c in notify.call_args_list if "GitHub token" in c.args[0]]
+            assert both.github == []
+
+        run_app(Search("deploy"), script)
+
+    @pytest.mark.parametrize(
+        ("ts", "expected"),
+        [
+            ("2026-10-30T01:00:00Z", "today"),
+            ("2026-10-25T00:00:00Z", "5d"),
+            ("2026-09-20T00:00:00Z", "5w"),
+            ("2026-04-01T00:00:00Z", "7mo"),
+            (1700000000, "2y"),
+            (None, ""),
+        ],
+    )
+    def test_age(self, ts, expected):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+        assert tui._age(ts, now) == expected
 
 
 class TestInteractiveFlag:

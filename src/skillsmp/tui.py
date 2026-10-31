@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 from rich.table import Table
 from rich.text import Text
@@ -27,6 +28,8 @@ SEARCH_DEBOUNCE = 0.2
 # there's plenty left.
 PREFETCH_MIN_REMAINING = 10
 SKILL_MD_DEBOUNCE = 0.15
+# Dracula's red, for skills whose GitHub repo is gone.
+GONE_STYLE = "#ff5555"
 # Textual's Markdown widget gets sluggish on huge documents.
 SKILL_MD_MAX_CHARS = 60_000
 
@@ -102,6 +105,8 @@ class Client:
         self._raw: dict[tuple, dict] = {}
         self._inflight: dict[tuple, threading.Event] = {}
         self._skill_md: dict[str, str | None] = {}
+        # {"updatedAt", "repoMissing"} for skills.sh skills, by skill ID.
+        self.dates: dict[str, dict] = {}
 
     @staticmethod
     def _key(source: str, params: dict) -> tuple:
@@ -232,20 +237,84 @@ class Client:
             self._skill_md[key] = text
         return text
 
+    def commit_dates(self, skills: list[dict]) -> dict[str, dict]:
+        """Look up and remember skills' last-commit dates; raises core.FetchError."""
+        with self._lock:
+            todo = [d for d in skills if d["id"] not in self.dates]
+            skill_mds = {
+                d["id"]: self._skill_md[d["skillUrl"]]
+                for d in todo
+                if self._skill_md.get(d["skillUrl"]) is not None
+            }
+        if todo:
+            found = core._commit_dates(todo, skill_mds)
+            with self._lock:
+                self.dates.update(found)
+        with self._lock:
+            return {d["id"]: self.dates.get(d["id"]) for d in skills}
+
     def skill_md_cached(self, d: dict) -> tuple[bool, str | None]:
         with self._lock:
             return d["skillUrl"] in self._skill_md, self._skill_md.get(d["skillUrl"])
 
 
-def _detail_text(d: dict, description: str = "") -> Text:
+def _parse_time(ts) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _age(ts, now: datetime | None = None) -> str:
+    """How long ago, in a few characters: 5d, 3w, 7mo, 2y."""
+    when = _parse_time(ts)
+    if when is None:
+        return ""
+    days = ((now or datetime.now(timezone.utc)) - when).days
+    if days < 1:
+        return "today"
+    if days < 14:
+        return f"{days}d"
+    if days < 60:
+        return f"{days // 7}w"
+    if days < 365:
+        return f"{days // 30}mo"
+    return f"{days // 365}y"
+
+
+def _detail_text(d: dict, description: str = "", dates_pending: bool = False) -> Text:
     t = Text()
     t.append(d["id"].rpartition("/")[0] + "/", style="dim")
     t.append(d["name"], style="bold")
     t.append("\n")
-    meta = [core._skill_stats(d).replace(", ", "  ·  "), f"from {core.SOURCE_LABELS[d['registry']]}"]
+    if d["registry"] == "skills.sh":
+        if d["installs"] is None:
+            meta = ["installs unknown"]
+        else:
+            meta = [f"{core._format_stars(d['installs'])} installs"]
+        if d["updatedAt"]:
+            age = _age(d["updatedAt"])
+            ago = age if age == "today" else f"{age} ago"
+            meta.append(f"updated {core._format_timestamp(d['updatedAt'])} ({ago})")
+        elif d["repoMissing"]:
+            meta.append(Text("GitHub repo deleted", style=GONE_STYLE))
+        elif dates_pending:
+            meta.append("updated …")
+        else:
+            meta.append("last commit unknown")
+    else:
+        meta = [core._skill_stats(d).replace(", ", "  ·  ")]
+    meta.append(f"from {core.SOURCE_LABELS[d['registry']]}")
     if d["contentLanguage"]:
         meta.append(f"lang {d['contentLanguage']}")
-    t.append("  ·  ".join(meta), style="dim")
+    items = [Text(m, style="dim") if isinstance(m, str) else m for m in meta]
+    t.append_text(Text("  ·  ", style="dim").join(items))
     t.append("\n\n")
     description = d["description"] or description
     if description:
@@ -275,7 +344,12 @@ def _option(d: dict) -> Option:
     row = Table.grid(expand=True, padding=(0, 1))
     row.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     row.add_column(justify="right", no_wrap=True)
-    row.add_row(name, Text(_metric(d), style="dim"))
+    row.add_column(justify="right", no_wrap=True, width=5)
+    if d["repoMissing"]:
+        age = Text("gone", style=GONE_STYLE)
+    else:
+        age = Text(_age(d["updatedAt"]), style="dim")
+    row.add_row(name, Text(_metric(d), style="dim"), age)
     return Option(row)
 
 
@@ -413,6 +487,7 @@ class SkillsmpApp(App):
         self._search_timer: Timer | None = None
         self._skill_md_timer: Timer | None = None
         self._shown_skill_md: str | None = None
+        self._warned_no_token = False
 
     # --- layout ---
 
@@ -487,10 +562,11 @@ class SkillsmpApp(App):
         self.loading_search = None
         self.skills, self.pagination, self.excluded = result
         self.results.remove_class("stale")
-        self.results.set_options([_option(core._normalize_skill(s)) for s in self.skills])
+        self.results.set_options([_option(self.normalize(s)) for s in self.skills])
         if self.skills:
             self.results.highlighted = 0
         self.show_detail(self.current())
+        self.fetch_dates_for_page()
         self.set_status()
         self.refresh_bindings()
         following = replace(self.search, page=self.search.page + 1)
@@ -580,11 +656,64 @@ class SkillsmpApp(App):
 
     # --- selection and detail pane ---
 
+    def normalize(self, skill: dict) -> dict:
+        d = core._normalize_skill(skill)
+        if d["registry"] == "skills.sh":
+            d.update(self.client.dates.get(d["id"], {}))
+        return d
+
     def current(self) -> dict | None:
         index = self.results.highlighted
         if index is None or index >= len(self.skills):
             return None
-        return core._normalize_skill(self.skills[index])
+        return self.normalize(self.skills[index])
+
+    # --- last-commit dates ---
+
+    def dates_pending(self, d: dict) -> bool:
+        return d["registry"] == "skills.sh" and d["id"] not in self.client.dates
+
+    def fetch_dates_for_page(self) -> None:
+        todo = [d for d in map(self.normalize, self.skills) if self.dates_pending(d)]
+        if todo:
+            self.fetch_dates(todo)
+
+    @work(thread=True, group="dates")
+    def fetch_dates(self, skills: list[dict]) -> None:
+        if not core._github_token():
+            self.call_from_thread(self.warn_no_token, skills)
+            return
+        try:
+            self.client.commit_dates(skills)
+        except (core.FetchError, ValueError) as e:
+            self.call_from_thread(
+                self.notify, f"Couldn't get last-commit dates from GitHub ({e})", severity="warning"
+            )
+            return
+        self.call_from_thread(self.dates_ready)
+
+    def warn_no_token(self, skills: list[dict]) -> None:
+        for d in skills:
+            self.client.dates.setdefault(d["id"], {"updatedAt": None, "repoMissing": False})
+        self.dates_ready()
+        if not self._warned_no_token:
+            self._warned_no_token = True
+            self.notify(core._missing_token_hint().capitalize() + ".", severity="warning", timeout=8)
+
+    def dates_ready(self) -> None:
+        """Redraw rows (and the detail pane) now that their dates are in."""
+        for i, skill in enumerate(self.skills):
+            d = self.normalize(skill)
+            if d["registry"] == "skills.sh":
+                self.results.replace_option_prompt_at_index(i, _option(d).prompt)
+        d = self.current()
+        if d is not None:
+            self.render_meta(d)
+
+    def render_meta(self, d: dict) -> None:
+        cached, text = self.client.skill_md_cached(d)
+        description = core._frontmatter_description(text) if cached and text else ""
+        self.meta.update(_detail_text(d, description, self.dates_pending(d)))
 
     @on(OptionList.OptionHighlighted, "#results")
     def highlighted(self) -> None:
@@ -599,7 +728,7 @@ class SkillsmpApp(App):
             meta.update(Text("Nothing selected.", style="dim"))
             self.set_skill_md(None, "")
             return
-        meta.update(_detail_text(d))
+        self.render_meta(d)
         detail.scroll_home(animate=False)
         cached, text = self.client.skill_md_cached(d)
         if cached:
@@ -621,7 +750,7 @@ class SkillsmpApp(App):
             return  # The highlight moved on.
         if d is not None and final and text and not d["description"]:
             # skills.sh search has no descriptions; SKILL.md's frontmatter does.
-            self.meta.update(_detail_text(d, core._frontmatter_description(text)))
+            self.render_meta(d)
         if final and text is None and d is not None:
             body = _missing_skill_md(d)
         else:
