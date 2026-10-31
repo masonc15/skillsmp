@@ -1118,11 +1118,12 @@ def _commit_dates(
         try:
             dirs = _repo_skill_dirs(repo)
         except FetchError as e:
-            if e.payload.get("code") == 404:
+            # Deleted, or blocked for legal reasons: either way, uninstallable.
+            if e.payload.get("code") in (404, 451):
                 return {d["id"]: False for d in unknown[repo]}
             if e.payload.get("code") == 409:  # an empty repo
                 return {d["id"]: None for d in unknown[repo]}
-            return {}  # Not cached, so it's retried next time.
+            raise
         except ValueError:
             return {}
         repo_name = repo.split("/")[1]
